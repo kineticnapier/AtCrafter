@@ -11,7 +11,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -19,6 +21,7 @@ public final class RunnerClient {
     private static final String BASE_URL = "http://127.0.0.1:8765";
     private static final URI HEALTH_URI = URI.create(BASE_URL + "/health");
     private static final URI RUN_URI = URI.create(BASE_URL + "/run");
+    private static final URI DEBUG_URI = URI.create(BASE_URL + "/debug");
     private static final URI PROBLEMS_URI = URI.create(BASE_URL + "/problems");
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -37,7 +40,6 @@ public final class RunnerClient {
             ticksUntilNextCheck--;
             return;
         }
-
         ticksUntilNextCheck = 20;
         checkHealth();
     }
@@ -110,12 +112,47 @@ public final class RunnerClient {
     }
 
     public static CompletableFuture<RunResult> run(String code, String stdin) {
+        return postExecution(RUN_URI, code, stdin).thenApply(RunnerClient::parseRunResult);
+    }
+
+    public static CompletableFuture<DebugResult> debug(String code, String stdin) {
+        return postExecution(DEBUG_URI, code, stdin).thenApply(response -> {
+            JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+            RunResult run = parseRunResult(json);
+            List<DebugStep> steps = new ArrayList<>();
+            JsonArray stepArray = json.getAsJsonArray("steps");
+            if (stepArray != null) {
+                for (JsonElement element : stepArray) {
+                    JsonObject step = element.getAsJsonObject();
+                    Map<String, String> locals = new LinkedHashMap<>();
+                    JsonObject localsJson = step.getAsJsonObject("locals");
+                    if (localsJson != null) {
+                        for (Map.Entry<String, JsonElement> entry : localsJson.entrySet()) {
+                            locals.put(entry.getKey(), entry.getValue().getAsString());
+                        }
+                    }
+                    steps.add(new DebugStep(
+                        step.get("line").getAsInt(),
+                        step.get("event").getAsString(),
+                        Map.copyOf(locals)
+                    ));
+                }
+            }
+            return new DebugResult(
+                run,
+                List.copyOf(steps),
+                json.has("traceTruncated") && json.get("traceTruncated").getAsBoolean()
+            );
+        });
+    }
+
+    private static CompletableFuture<HttpResponse<String>> postExecution(URI uri, String code, String stdin) {
         JsonObject body = new JsonObject();
         body.addProperty("code", code);
         body.addProperty("stdin", stdin);
         body.addProperty("timeoutMs", 2_000);
 
-        HttpRequest request = HttpRequest.newBuilder(RUN_URI)
+        HttpRequest request = HttpRequest.newBuilder(uri)
             .timeout(Duration.ofSeconds(4))
             .header("Content-Type", "application/json; charset=utf-8")
             .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
@@ -124,19 +161,25 @@ public final class RunnerClient {
         return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
             .thenApply(response -> {
                 ensureOk(response);
-                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-                Integer exitCode = json.get("exitCode").isJsonNull() ? null : json.get("exitCode").getAsInt();
-
-                return new RunResult(
-                    json.get("status").getAsString(),
-                    exitCode,
-                    json.get("stdout").getAsString(),
-                    json.get("stderr").getAsString(),
-                    json.get("elapsedMs").getAsDouble(),
-                    json.get("timedOut").getAsBoolean(),
-                    json.get("outputTruncated").getAsBoolean()
-                );
+                return response;
             });
+    }
+
+    private static RunResult parseRunResult(HttpResponse<String> response) {
+        return parseRunResult(JsonParser.parseString(response.body()).getAsJsonObject());
+    }
+
+    private static RunResult parseRunResult(JsonObject json) {
+        Integer exitCode = json.get("exitCode").isJsonNull() ? null : json.get("exitCode").getAsInt();
+        return new RunResult(
+            json.get("status").getAsString(),
+            exitCode,
+            json.get("stdout").getAsString(),
+            json.get("stderr").getAsString(),
+            json.get("elapsedMs").getAsDouble(),
+            json.get("timedOut").getAsBoolean(),
+            json.get("outputTruncated").getAsBoolean()
+        );
     }
 
     private static void ensureOk(HttpResponse<?> response) {
@@ -151,7 +194,6 @@ public final class RunnerClient {
         }
 
         status = Status.CHECKING;
-
         HttpRequest request = HttpRequest.newBuilder(HEALTH_URI)
             .timeout(Duration.ofMillis(800))
             .GET()
@@ -193,6 +235,12 @@ public final class RunnerClient {
         boolean timedOut,
         boolean outputTruncated
     ) {
+    }
+
+    public record DebugStep(int line, String event, Map<String, String> locals) {
+    }
+
+    public record DebugResult(RunResult run, List<DebugStep> steps, boolean traceTruncated) {
     }
 
     public enum Status {
