@@ -196,10 +196,10 @@ public final class RunnerClient {
     }
 
     public enum Status {
-        UNKNOWN("Runner: Unknown", 0xA0A0A0),
-        CHECKING("Runner: Checking...", 0xE0E0E0),
-        ONLINE("Runner: Online", 0x55FF55),
-        OFFLINE("Runner: Offline", 0xFF5555);
+        UNKNOWN("Runner: 不明", 0xA0A0A0),
+        CHECKING("Runner: 確認中...", 0xE0E0E0),
+        ONLINE("Runner: オンライン", 0x55FF55),
+        OFFLINE("Runner: オフライン", 0xFF5555);
 
         private final String label;
         private final int color;
