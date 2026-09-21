@@ -20,6 +20,74 @@ MAX_TIMEOUT_MS = 10_000
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PROBLEMS_DIR = ROOT_DIR / "problems"
 
+DEBUG_DRIVER = r'''
+import json
+import sys
+import traceback
+
+TARGET = sys.argv[1]
+TRACE_FILE = sys.argv[2]
+MAX_STEPS = 5000
+MAX_VALUE_CHARS = 240
+steps = []
+trace_truncated = False
+
+
+def safe_repr(value):
+    try:
+        text = repr(value)
+    except Exception as error:
+        text = f"<repr failed: {type(error).__name__}>"
+    if len(text) > MAX_VALUE_CHARS:
+        return text[: MAX_VALUE_CHARS - 3] + "..."
+    return text
+
+
+def snapshot(frame):
+    result = {}
+    for name, value in frame.f_locals.items():
+        if name.startswith("__"):
+            continue
+        result[str(name)] = safe_repr(value)
+    return result
+
+
+def tracer(frame, event, arg):
+    global trace_truncated
+    if frame.f_code.co_filename == TARGET and event in ("line", "return"):
+        if len(steps) < MAX_STEPS:
+            steps.append({
+                "line": frame.f_lineno,
+                "event": event,
+                "locals": snapshot(frame),
+            })
+        else:
+            trace_truncated = True
+    return tracer
+
+
+namespace = {"__name__": "__main__", "__file__": TARGET}
+try:
+    source = open(TARGET, "r", encoding="utf-8").read()
+    compiled = compile(source, TARGET, "exec")
+    sys.settrace(tracer)
+    exec(compiled, namespace, namespace)
+except BaseException:
+    traceback.print_exc()
+finally:
+    sys.settrace(None)
+    try:
+        with open(TRACE_FILE, "w", encoding="utf-8") as trace_file:
+            json.dump(
+                {"steps": steps, "traceTruncated": trace_truncated},
+                trace_file,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    except Exception:
+        traceback.print_exc()
+'''
+
 
 def json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -113,16 +181,55 @@ def list_problems() -> list[dict[str, str]]:
     return result
 
 
+def make_execution_result(
+    process: subprocess.CompletedProcess[str],
+    started: float,
+) -> dict[str, Any]:
+    stdout, stdout_truncated = truncate(process.stdout)
+    stderr, stderr_truncated = truncate(process.stderr)
+    return {
+        "status": "finished",
+        "exitCode": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
+        "timedOut": False,
+        "outputTruncated": stdout_truncated or stderr_truncated,
+    }
+
+
+def make_timeout_result(error: subprocess.TimeoutExpired, started: float) -> dict[str, Any]:
+    stdout = error.stdout or ""
+    stderr = error.stderr or ""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    stdout, stdout_truncated = truncate(stdout)
+    stderr, stderr_truncated = truncate(stderr)
+    return {
+        "status": "timed_out",
+        "exitCode": None,
+        "stdout": stdout,
+        "stderr": stderr,
+        "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
+        "timedOut": True,
+        "outputTruncated": stdout_truncated or stderr_truncated,
+    }
+
+
+def execution_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def run_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
     started = time.perf_counter()
-
     with tempfile.TemporaryDirectory(prefix="atcrafter-") as temp_dir:
         script_path = os.path.join(temp_dir, "main.py")
         with open(script_path, "w", encoding="utf-8", newline="\n") as script:
             script.write(code)
-
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
 
         try:
             process = subprocess.run(
@@ -134,47 +241,62 @@ def run_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=temp_dir,
-                env=env,
+                env=execution_env(),
                 timeout=timeout_ms / 1000.0,
                 check=False,
             )
-
-            stdout, stdout_truncated = truncate(process.stdout)
-            stderr, stderr_truncated = truncate(process.stderr)
-
-            return {
-                "status": "finished",
-                "exitCode": process.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
-                "timedOut": False,
-                "outputTruncated": stdout_truncated or stderr_truncated,
-            }
+            return make_execution_result(process, started)
         except subprocess.TimeoutExpired as error:
-            stdout = error.stdout or ""
-            stderr = error.stderr or ""
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode("utf-8", errors="replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode("utf-8", errors="replace")
+            return make_timeout_result(error, started)
 
-            stdout, stdout_truncated = truncate(stdout)
-            stderr, stderr_truncated = truncate(stderr)
 
-            return {
-                "status": "timed_out",
-                "exitCode": None,
-                "stdout": stdout,
-                "stderr": stderr,
-                "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
-                "timedOut": True,
-                "outputTruncated": stdout_truncated or stderr_truncated,
-            }
+def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="atcrafter-debug-") as temp_dir:
+        script_path = os.path.join(temp_dir, "main.py")
+        driver_path = os.path.join(temp_dir, "debug_driver.py")
+        trace_path = os.path.join(temp_dir, "trace.json")
+
+        with open(script_path, "w", encoding="utf-8", newline="\n") as script:
+            script.write(code)
+        with open(driver_path, "w", encoding="utf-8", newline="\n") as driver:
+            driver.write(DEBUG_DRIVER)
+
+        try:
+            process = subprocess.run(
+                [sys.executable, driver_path, script_path, trace_path],
+                input=stdin,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=temp_dir,
+                env=execution_env(),
+                timeout=timeout_ms / 1000.0,
+                check=False,
+            )
+            result = make_execution_result(process, started)
+        except subprocess.TimeoutExpired as error:
+            result = make_timeout_result(error, started)
+
+        trace_data: dict[str, Any] = {"steps": [], "traceTruncated": False}
+        try:
+            if os.path.isfile(trace_path):
+                loaded = json.loads(Path(trace_path).read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    trace_data = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        steps = trace_data.get("steps", [])
+        result["steps"] = steps if isinstance(steps, list) else []
+        result["traceTruncated"] = bool(trace_data.get("traceTruncated", False))
+        return result
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.2"
+    server_version = "AtCrafterRunner/0.3"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -194,7 +316,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.2",
+                    "runnerVersion": "0.3",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
@@ -217,7 +339,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
-        if self.path != "/run":
+        if self.path not in {"/run", "/debug"}:
             self.send_json(404, {"error": "not_found"})
             return
 
@@ -246,7 +368,11 @@ class RunnerHandler(BaseHTTPRequestHandler):
         timeout_ms = clamp_timeout(payload.get("timeoutMs"))
 
         try:
-            result = run_python(code, stdin, timeout_ms)
+            result = (
+                debug_python(code, stdin, timeout_ms)
+                if self.path == "/debug"
+                else run_python(code, stdin, timeout_ms)
+            )
         except Exception as error:
             self.send_json(
                 500,
