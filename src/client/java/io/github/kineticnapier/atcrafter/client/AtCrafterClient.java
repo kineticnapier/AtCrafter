@@ -9,6 +9,7 @@ import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.world.InteractionResult;
 
@@ -63,7 +64,11 @@ public class AtCrafterClient implements ClientModInitializer {
         Button refresh = null;
         Button close = null;
 
-        for (Button button : Screens.getButtons(screen)) {
+        for (AbstractWidget widget : Screens.getButtons(screen)) {
+            if (!(widget instanceof Button button)) {
+                continue;
+            }
+
             switch (button.getMessage().getString()) {
                 case "サンプル" -> sample = button;
                 case "提出" -> submit = button;
