@@ -1,0 +1,4 @@
+{
+  "title": "A - Sum",
+  "defaultCode": "A = list(map(int, input().split()))\nprint(sum(A))"
+}
