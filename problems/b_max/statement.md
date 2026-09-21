@@ -1,3 +1,15 @@
-Given one line of integers, print the maximum value.
+## 問題文
+1 行に整数列 A が与えられます。
+A に含まれる整数のうち、最大の値を出力してください。
 
-The number of integers is at least 1.
+## 制約
+- A に含まれる整数の個数は 1 個以上です。
+- 各整数は 32 bit 符号付き整数の範囲に収まります。
+
+## 入力
+入力は次の形式で与えられます。
+
+A1 A2 ... An
+
+## 出力
+A に含まれる整数の最大値を 1 行に出力してください。
