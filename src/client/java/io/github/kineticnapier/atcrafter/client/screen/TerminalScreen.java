@@ -1,5 +1,6 @@
 package io.github.kineticnapier.atcrafter.client.screen;
 
+import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -20,6 +21,12 @@ public final class TerminalScreen extends Screen {
         int y = this.height / 2 + 35;
 
         addRenderableWidget(
+            Button.builder(Component.literal("Refresh"), button -> RunnerClient.checkNow())
+                .bounds(x, y - 25, buttonWidth, buttonHeight)
+                .build()
+        );
+
+        addRenderableWidget(
             Button.builder(Component.literal("Close"), button -> onClose())
                 .bounds(x, y, buttonWidth, buttonHeight)
                 .build()
@@ -33,14 +40,15 @@ public final class TerminalScreen extends Screen {
 
         int centerX = this.width / 2;
         int top = this.height / 2 - 55;
+        RunnerClient.Status runnerStatus = RunnerClient.getStatus();
 
         graphics.drawCenteredString(this.font, TITLE, centerX, top, 0xFFFFFF);
         graphics.drawCenteredString(
             this.font,
-            Component.literal("Runner: Offline"),
+            Component.literal(runnerStatus.label()),
             centerX,
             top + 28,
-            0xA0A0A0
+            runnerStatus.color()
         );
     }
 
