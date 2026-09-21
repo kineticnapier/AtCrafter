@@ -1,0 +1,4 @@
+{
+  "title": "B - Maximum",
+  "defaultCode": "A = list(map(int, input().split()))\nprint(max(A))"
+}
