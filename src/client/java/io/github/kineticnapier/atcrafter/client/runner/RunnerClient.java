@@ -1,5 +1,7 @@
 package io.github.kineticnapier.atcrafter.client.runner;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.net.URI;
@@ -8,12 +10,17 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class RunnerClient {
-    private static final URI HEALTH_URI = URI.create("http://127.0.0.1:8765/health");
-    private static final URI RUN_URI = URI.create("http://127.0.0.1:8765/run");
+    private static final String BASE_URL = "http://127.0.0.1:8765";
+    private static final URI HEALTH_URI = URI.create(BASE_URL + "/health");
+    private static final URI RUN_URI = URI.create(BASE_URL + "/run");
+    private static final URI PROBLEMS_URI = URI.create(BASE_URL + "/problems");
+
     private static final HttpClient HTTP = HttpClient.newBuilder()
         .connectTimeout(Duration.ofMillis(600))
         .build();
@@ -44,6 +51,64 @@ public final class RunnerClient {
         checkHealth();
     }
 
+    public static CompletableFuture<List<ProblemSummary>> listProblems() {
+        HttpRequest request = HttpRequest.newBuilder(PROBLEMS_URI)
+            .timeout(Duration.ofSeconds(2))
+            .GET()
+            .build();
+
+        return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            .thenApply(response -> {
+                ensureOk(response);
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                JsonArray array = json.getAsJsonArray("problems");
+                List<ProblemSummary> problems = new ArrayList<>();
+                for (JsonElement element : array) {
+                    JsonObject problem = element.getAsJsonObject();
+                    problems.add(new ProblemSummary(
+                        problem.get("id").getAsString(),
+                        problem.get("title").getAsString()
+                    ));
+                }
+                return List.copyOf(problems);
+            });
+    }
+
+    public static CompletableFuture<ProblemData> loadProblem(String id) {
+        URI uri = URI.create(BASE_URL + "/problems/" + id);
+        HttpRequest request = HttpRequest.newBuilder(uri)
+            .timeout(Duration.ofSeconds(2))
+            .GET()
+            .build();
+
+        return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            .thenApply(response -> {
+                ensureOk(response);
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                return new ProblemData(
+                    json.get("id").getAsString(),
+                    json.get("title").getAsString(),
+                    json.get("statement").getAsString(),
+                    json.get("defaultCode").getAsString(),
+                    parseTests(json.getAsJsonArray("samples")),
+                    parseTests(json.getAsJsonArray("tests"))
+                );
+            });
+    }
+
+    private static List<TestCase> parseTests(JsonArray array) {
+        List<TestCase> tests = new ArrayList<>();
+        for (JsonElement element : array) {
+            JsonObject test = element.getAsJsonObject();
+            tests.add(new TestCase(
+                test.get("name").getAsString(),
+                test.get("stdin").getAsString(),
+                test.get("expected").getAsString()
+            ));
+        }
+        return List.copyOf(tests);
+    }
+
     public static CompletableFuture<RunResult> run(String code, String stdin) {
         JsonObject body = new JsonObject();
         body.addProperty("code", code);
@@ -58,10 +123,7 @@ public final class RunnerClient {
 
         return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
             .thenApply(response -> {
-                if (response.statusCode() != 200) {
-                    throw new IllegalStateException("Runner returned HTTP " + response.statusCode());
-                }
-
+                ensureOk(response);
                 JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
                 Integer exitCode = json.get("exitCode").isJsonNull() ? null : json.get("exitCode").getAsInt();
 
@@ -75,6 +137,12 @@ public final class RunnerClient {
                     json.get("outputTruncated").getAsBoolean()
                 );
             });
+    }
+
+    private static void ensureOk(HttpResponse<?> response) {
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Runner returned HTTP " + response.statusCode());
+        }
     }
 
     private static void checkHealth() {
@@ -98,6 +166,22 @@ public final class RunnerClient {
                 }
                 REQUEST_IN_FLIGHT.set(false);
             });
+    }
+
+    public record ProblemSummary(String id, String title) {
+    }
+
+    public record TestCase(String name, String stdin, String expected) {
+    }
+
+    public record ProblemData(
+        String id,
+        String title,
+        String statement,
+        String defaultCode,
+        List<TestCase> samples,
+        List<TestCase> tests
+    ) {
     }
 
     public record RunResult(
