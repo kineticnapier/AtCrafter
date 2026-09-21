@@ -1,7 +1,9 @@
 package io.github.kineticnapier.atcrafter.client.screen;
 
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineEditBox;
@@ -11,19 +13,6 @@ import net.minecraft.util.FormattedCharSequence;
 
 public final class TerminalScreen extends Screen {
     private static final Component TITLE = Component.literal("AtCrafter");
-    private static final String PROBLEM_TITLE = "A - Sum";
-    private static final String PROBLEM_TEXT = "Sum all integers from one line and print the result.";
-
-    private static final List<TestCase> SAMPLE_TESTS = List.of(
-        new TestCase("Sample 1", "1 2 3 4 5\n", "15\n")
-    );
-
-    private static final List<TestCase> SUBMIT_TESTS = List.of(
-        new TestCase("Test 1", "1 2 3 4 5\n", "15\n"),
-        new TestCase("Test 2", "10\n", "10\n"),
-        new TestCase("Test 3", "-5 2 9\n", "6\n"),
-        new TestCase("Test 4", "100 200 300 400\n", "1000\n")
-    );
 
     private Tab currentTab = Tab.CODE;
 
@@ -32,13 +21,23 @@ public final class TerminalScreen extends Screen {
     private Button problemTabButton;
     private Button codeTabButton;
     private Button judgeTabButton;
+    private Button previousProblemButton;
+    private Button nextProblemButton;
     private Button runButton;
     private Button sampleButton;
     private Button submitButton;
     private Button refreshButton;
     private Button closeButton;
 
+    private final Map<String, String> codeDrafts = new HashMap<>();
+    private final Map<String, String> stdinDrafts = new HashMap<>();
+
+    private List<RunnerClient.ProblemSummary> problems = List.of();
+    private RunnerClient.ProblemData currentProblem;
+    private int problemIndex = -1;
+    private boolean loadingProblems;
     private boolean running;
+    private String problemError = "";
     private String resultText = "No judge result yet.";
     private int resultColor = 0xA0A0A0;
 
@@ -92,7 +91,6 @@ public final class TerminalScreen extends Screen {
             Component.literal("Python code editor")
         );
         this.codeBox.setCharacterLimit(32_000);
-        this.codeBox.setValue("A = list(map(int, input().split()))\nprint(sum(A))");
         addRenderableWidget(this.codeBox);
 
         this.stdinBox = new MultiLineEditBox(
@@ -105,44 +103,171 @@ public final class TerminalScreen extends Screen {
             Component.literal("Standard input")
         );
         this.stdinBox.setCharacterLimit(32_000);
-        this.stdinBox.setValue("1 2 3 4 5");
         addRenderableWidget(this.stdinBox);
 
-        int smallGap = 6;
-        int smallWidth = Math.min(86, Math.max(58, (contentWidth - smallGap * 3) / 4));
+        int gap = 6;
+        int buttonWidth = 76;
+
+        this.previousProblemButton = addRenderableWidget(
+            Button.builder(Component.literal("< Prev"), button -> changeProblem(-1))
+                .bounds(contentX, bottomY, buttonWidth, 20)
+                .build()
+        );
+        this.nextProblemButton = addRenderableWidget(
+            Button.builder(Component.literal("Next >"), button -> changeProblem(1))
+                .bounds(contentX + buttonWidth + gap, bottomY, buttonWidth, 20)
+                .build()
+        );
 
         this.runButton = addRenderableWidget(
             Button.builder(Component.literal("Run"), button -> runCode())
-                .bounds(contentX, bottomY, smallWidth, 20)
+                .bounds(contentX, bottomY, buttonWidth, 20)
                 .build()
         );
 
         this.sampleButton = addRenderableWidget(
-            Button.builder(Component.literal("Sample"), button -> runJudge(SAMPLE_TESTS, "Sample"))
-                .bounds(contentX, bottomY, smallWidth, 20)
+            Button.builder(Component.literal("Sample"), button -> runJudge(currentSamples(), "Sample"))
+                .bounds(contentX, bottomY, buttonWidth, 20)
                 .build()
         );
-
         this.submitButton = addRenderableWidget(
-            Button.builder(Component.literal("Submit"), button -> runJudge(SUBMIT_TESTS, "Submit"))
-                .bounds(contentX + smallWidth + smallGap, bottomY, smallWidth, 20)
+            Button.builder(Component.literal("Submit"), button -> runJudge(currentTests(), "Submit"))
+                .bounds(contentX + buttonWidth + gap, bottomY, buttonWidth, 20)
                 .build()
         );
 
         this.refreshButton = addRenderableWidget(
-            Button.builder(Component.literal("Refresh"), button -> RunnerClient.checkNow())
-                .bounds(contentX + contentWidth - smallWidth * 2 - smallGap, bottomY, smallWidth, 20)
+            Button.builder(Component.literal("Refresh"), button -> {
+                RunnerClient.checkNow();
+                loadProblemList();
+            })
+                .bounds(contentX + contentWidth - buttonWidth * 2 - gap, bottomY, buttonWidth, 20)
                 .build()
         );
-
         this.closeButton = addRenderableWidget(
             Button.builder(Component.literal("Close"), button -> onClose())
-                .bounds(contentX + contentWidth - smallWidth, bottomY, smallWidth, 20)
+                .bounds(contentX + contentWidth - buttonWidth, bottomY, buttonWidth, 20)
                 .build()
         );
 
         applyTabVisibility();
         updateActionButtons();
+        loadProblemList();
+    }
+
+    private void loadProblemList() {
+        if (this.loadingProblems) {
+            return;
+        }
+
+        saveDrafts();
+        this.loadingProblems = true;
+        this.problemError = "";
+
+        RunnerClient.listProblems().whenComplete((loaded, error) -> {
+            if (this.minecraft == null) {
+                return;
+            }
+            this.minecraft.execute(() -> {
+                this.loadingProblems = false;
+                if (error != null) {
+                    this.problems = List.of();
+                    this.currentProblem = null;
+                    this.problemIndex = -1;
+                    this.problemError = "Failed to load problems: " + rootMessage(error);
+                    updateActionButtons();
+                    return;
+                }
+
+                this.problems = loaded;
+                if (loaded.isEmpty()) {
+                    this.currentProblem = null;
+                    this.problemIndex = -1;
+                    this.problemError = "No problems found in the problems directory.";
+                    updateActionButtons();
+                    return;
+                }
+
+                int wanted = 0;
+                if (this.currentProblem != null) {
+                    for (int i = 0; i < loaded.size(); i++) {
+                        if (loaded.get(i).id().equals(this.currentProblem.id())) {
+                            wanted = i;
+                            break;
+                        }
+                    }
+                }
+                loadProblem(wanted);
+            });
+        });
+    }
+
+    private void loadProblem(int index) {
+        if (index < 0 || index >= this.problems.size()) {
+            return;
+        }
+
+        saveDrafts();
+        RunnerClient.ProblemSummary summary = this.problems.get(index);
+        this.loadingProblems = true;
+        this.problemError = "";
+
+        RunnerClient.loadProblem(summary.id()).whenComplete((problem, error) -> {
+            if (this.minecraft == null) {
+                return;
+            }
+            this.minecraft.execute(() -> {
+                this.loadingProblems = false;
+                if (error != null) {
+                    this.problemError = "Failed to load " + summary.title() + ": " + rootMessage(error);
+                    updateActionButtons();
+                    return;
+                }
+
+                this.problemIndex = index;
+                this.currentProblem = problem;
+                this.problemError = "";
+
+                String code = this.codeDrafts.getOrDefault(problem.id(), problem.defaultCode());
+                this.codeBox.setValue(code);
+
+                String stdin = this.stdinDrafts.get(problem.id());
+                if (stdin == null) {
+                    stdin = problem.samples().isEmpty() ? "" : problem.samples().get(0).stdin();
+                }
+                this.stdinBox.setValue(stdin);
+
+                this.resultText = "No judge result yet for " + problem.title() + ".";
+                this.resultColor = 0xA0A0A0;
+                updateActionButtons();
+            });
+        });
+    }
+
+    private void changeProblem(int delta) {
+        if (this.loadingProblems || this.problems.isEmpty()) {
+            return;
+        }
+        int next = this.problemIndex + delta;
+        if (next >= 0 && next < this.problems.size()) {
+            loadProblem(next);
+        }
+    }
+
+    private void saveDrafts() {
+        if (this.currentProblem == null || this.codeBox == null || this.stdinBox == null) {
+            return;
+        }
+        this.codeDrafts.put(this.currentProblem.id(), this.codeBox.getValue());
+        this.stdinDrafts.put(this.currentProblem.id(), this.stdinBox.getValue());
+    }
+
+    private List<RunnerClient.TestCase> currentSamples() {
+        return this.currentProblem == null ? List.of() : this.currentProblem.samples();
+    }
+
+    private List<RunnerClient.TestCase> currentTests() {
+        return this.currentProblem == null ? List.of() : this.currentProblem.tests();
     }
 
     private void switchTab(Tab tab) {
@@ -155,19 +280,21 @@ public final class TerminalScreen extends Screen {
             return;
         }
 
+        boolean problem = this.currentTab == Tab.PROBLEM;
         boolean code = this.currentTab == Tab.CODE;
         boolean judge = this.currentTab == Tab.JUDGE;
 
         this.codeBox.visible = code;
         this.stdinBox.visible = code;
+        this.previousProblemButton.visible = problem;
+        this.nextProblemButton.visible = problem;
         this.runButton.visible = code;
-
         this.sampleButton.visible = judge;
         this.submitButton.visible = judge;
 
-        this.problemTabButton.active = this.currentTab != Tab.PROBLEM;
-        this.codeTabButton.active = this.currentTab != Tab.CODE;
-        this.judgeTabButton.active = this.currentTab != Tab.JUDGE;
+        this.problemTabButton.active = !problem;
+        this.codeTabButton.active = !code;
+        this.judgeTabButton.active = !judge;
     }
 
     @Override
@@ -177,11 +304,16 @@ public final class TerminalScreen extends Screen {
     }
 
     private void updateActionButtons() {
-        boolean available = !this.running && RunnerClient.getStatus() == RunnerClient.Status.ONLINE;
+        boolean online = RunnerClient.getStatus() == RunnerClient.Status.ONLINE;
+        boolean loaded = this.currentProblem != null && !this.loadingProblems;
+        boolean available = !this.running && online && loaded;
+
         if (this.runButton != null) {
             this.runButton.active = available;
-            this.sampleButton.active = available;
-            this.submitButton.active = available;
+            this.sampleButton.active = available && !currentSamples().isEmpty();
+            this.submitButton.active = available && !currentTests().isEmpty();
+            this.previousProblemButton.active = loaded && this.problemIndex > 0;
+            this.nextProblemButton.active = loaded && this.problemIndex >= 0 && this.problemIndex + 1 < this.problems.size();
         }
     }
 
@@ -192,10 +324,11 @@ public final class TerminalScreen extends Screen {
     }
 
     private void runCode() {
-        if (this.running || RunnerClient.getStatus() != RunnerClient.Status.ONLINE) {
+        if (this.running || this.currentProblem == null || RunnerClient.getStatus() != RunnerClient.Status.ONLINE) {
             return;
         }
 
+        saveDrafts();
         setBusy(true, "Running...");
         this.resultText = "Running...";
         this.resultColor = 0xE0E0E0;
@@ -208,33 +341,36 @@ public final class TerminalScreen extends Screen {
 
                 this.minecraft.execute(() -> {
                     setBusy(false, "Run");
-
                     if (error != null) {
                         showRunnerError(error);
-                        this.currentTab = Tab.JUDGE;
-                        applyTabVisibility();
-                        return;
+                    } else {
+                        showRunResult(result);
                     }
-
-                    showRunResult(result);
                     this.currentTab = Tab.JUDGE;
                     applyTabVisibility();
                 });
             });
     }
 
-    private void runJudge(List<TestCase> tests, String mode) {
-        if (this.running || RunnerClient.getStatus() != RunnerClient.Status.ONLINE) {
+    private void runJudge(List<RunnerClient.TestCase> tests, String mode) {
+        if (this.running || this.currentProblem == null || tests.isEmpty()
+            || RunnerClient.getStatus() != RunnerClient.Status.ONLINE) {
             return;
         }
 
+        saveDrafts();
         setBusy(true, mode + "...");
-        this.resultText = mode + " judging...";
+        this.resultText = mode + " judging " + this.currentProblem.title() + "...";
         this.resultColor = 0xE0E0E0;
-        runJudgeCase(tests, 0, new StringBuilder(), true, mode);
+        runJudgeCase(tests, 0, new StringBuilder(), true);
     }
 
-    private void runJudgeCase(List<TestCase> tests, int index, StringBuilder report, boolean allAccepted, String mode) {
+    private void runJudgeCase(
+        List<RunnerClient.TestCase> tests,
+        int index,
+        StringBuilder report,
+        boolean allAccepted
+    ) {
         if (index >= tests.size()) {
             boolean accepted = allAccepted;
             if (this.minecraft != null) {
@@ -247,7 +383,7 @@ public final class TerminalScreen extends Screen {
             return;
         }
 
-        TestCase test = tests.get(index);
+        RunnerClient.TestCase test = tests.get(index);
         RunnerClient.run(this.codeBox.getValue(), test.stdin())
             .whenComplete((result, error) -> {
                 if (error != null) {
@@ -275,8 +411,7 @@ public final class TerminalScreen extends Screen {
                     report.append(" ").append(oneLine(result.stderr())).append('\n');
                 }
 
-                boolean stillAccepted = allAccepted && verdict == Verdict.AC;
-                runJudgeCase(tests, index + 1, report, stillAccepted, mode);
+                runJudgeCase(tests, index + 1, report, allAccepted && verdict == Verdict.AC);
             });
     }
 
@@ -291,9 +426,7 @@ public final class TerminalScreen extends Screen {
     }
 
     private static String normalizeOutput(String text) {
-        return text.replace("\r\n", "\n")
-            .replace('\r', '\n')
-            .stripTrailing();
+        return text.replace("\r\n", "\n").replace('\r', '\n').stripTrailing();
     }
 
     private static String oneLine(String text) {
@@ -377,29 +510,72 @@ public final class TerminalScreen extends Screen {
     }
 
     private void renderProblem(GuiGraphics graphics, int x, int y, int width) {
-        graphics.drawString(this.font, Component.literal(PROBLEM_TITLE), x, y, 0xFFFF55);
-        graphics.drawWordWrap(this.font, Component.literal(PROBLEM_TEXT), x, y + 18, width, 0xE0E0E0);
+        if (this.loadingProblems) {
+            graphics.drawString(this.font, Component.literal("Loading problems..."), x, y, 0xE0E0E0);
+            return;
+        }
+        if (this.currentProblem == null) {
+            String message = this.problemError.isBlank() ? "No problem loaded." : this.problemError;
+            graphics.drawWordWrap(this.font, Component.literal(message), x, y, width, 0xFF5555);
+            return;
+        }
 
-        int sampleY = y + 52;
+        String position = (this.problemIndex + 1) + " / " + this.problems.size();
+        graphics.drawString(this.font, Component.literal(this.currentProblem.title()), x, y, 0xFFFF55);
+        graphics.drawString(
+            this.font,
+            Component.literal(position),
+            x + width - this.font.width(position),
+            y,
+            0xAAAAAA
+        );
+        graphics.drawWordWrap(
+            this.font,
+            Component.literal(this.currentProblem.statement()),
+            x,
+            y + 18,
+            width,
+            0xE0E0E0
+        );
+
+        int sampleY = y + 62;
+        if (this.currentProblem.samples().isEmpty()) {
+            graphics.drawString(this.font, Component.literal("No samples."), x, sampleY, 0xAAAAAA);
+            return;
+        }
+
+        RunnerClient.TestCase sample = this.currentProblem.samples().get(0);
         graphics.drawString(this.font, Component.literal("Sample Input"), x, sampleY, 0xAAAAAA);
-        graphics.fill(x, sampleY + 12, x + width, sampleY + 34, 0x66000000);
-        graphics.drawString(this.font, Component.literal("1 2 3 4 5"), x + 5, sampleY + 18, 0xFFFFFF);
+        graphics.fill(x, sampleY + 12, x + width, sampleY + 42, 0x66000000);
+        drawMultiline(graphics, sample.stdin(), x + 5, sampleY + 18, width - 10, 2, 0xFFFFFF);
 
-        int outputY = sampleY + 48;
+        int outputY = sampleY + 50;
         graphics.drawString(this.font, Component.literal("Sample Output"), x, outputY, 0xAAAAAA);
-        graphics.fill(x, outputY + 12, x + width, outputY + 34, 0x66000000);
-        graphics.drawString(this.font, Component.literal("15"), x + 5, outputY + 18, 0xFFFFFF);
+        graphics.fill(x, outputY + 12, x + width, outputY + 42, 0x66000000);
+        drawMultiline(graphics, sample.expected(), x + 5, outputY + 18, width - 10, 2, 0xFFFFFF);
     }
 
     private void renderCodeLabels(GuiGraphics graphics, int x) {
+        if (this.currentProblem != null) {
+            graphics.drawString(this.font, Component.literal(this.currentProblem.title()), x, 56, 0xAAAAAA);
+        }
         graphics.drawString(this.font, Component.literal("Python"), x, this.codeBox.getY() - 12, 0xE0E0E0);
         graphics.drawString(this.font, Component.literal("stdin"), x, this.stdinBox.getY() - 12, 0xE0E0E0);
     }
 
     private void renderJudge(GuiGraphics graphics, int x, int y, int width, int bottom) {
-        graphics.drawString(this.font, Component.literal("Output / Judge"), x, y - 12, 0xE0E0E0);
+        String heading = this.currentProblem == null ? "Output / Judge" : "Output / Judge - " + this.currentProblem.title();
+        graphics.drawString(this.font, Component.literal(heading), x, y - 12, 0xE0E0E0);
         graphics.fill(x, y, x + width, bottom, 0x66000000);
         renderOutput(graphics, x + 6, y + 6, width - 12, bottom - y - 12);
+    }
+
+    private void drawMultiline(GuiGraphics graphics, String text, int x, int y, int width, int maxLines, int color) {
+        List<FormattedCharSequence> lines = this.font.split(Component.literal(text.stripTrailing()), Math.max(10, width));
+        int count = Math.min(maxLines, lines.size());
+        for (int i = 0; i < count; i++) {
+            graphics.drawString(this.font, lines.get(i), x, y + i * (this.font.lineHeight + 1), color);
+        }
     }
 
     private void renderOutput(GuiGraphics graphics, int x, int y, int width, int height) {
@@ -411,7 +587,6 @@ public final class TerminalScreen extends Screen {
         for (int i = 0; i < count; i++) {
             graphics.drawString(this.font, lines.get(i), x, y + i * lineHeight, this.resultColor);
         }
-
         if (lines.size() > maxLines && maxLines > 0) {
             graphics.drawString(this.font, "...", x, y + (maxLines - 1) * lineHeight, 0xA0A0A0);
         }
@@ -420,9 +595,6 @@ public final class TerminalScreen extends Screen {
     @Override
     public boolean isPauseScreen() {
         return false;
-    }
-
-    private record TestCase(String name, String stdin, String expected) {
     }
 
     private enum Tab {
