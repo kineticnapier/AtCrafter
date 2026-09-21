@@ -38,8 +38,11 @@ public final class TerminalScreen extends Screen {
     private boolean loadingProblems;
     private boolean running;
     private String problemError = "";
-    private String resultText = "No judge result yet.";
+    private String resultText = "まだ判定していません。";
     private int resultColor = 0xA0A0A0;
+
+    private int problemScroll;
+    private int problemContentHeight;
 
     public TerminalScreen() {
         super(TITLE);
@@ -47,9 +50,8 @@ public final class TerminalScreen extends Screen {
 
     @Override
     protected void init() {
-        int margin = 12;
-        int contentWidth = Math.min(this.width - margin * 2, 720);
-        int contentX = (this.width - contentWidth) / 2;
+        int contentWidth = contentWidth();
+        int contentX = contentX();
 
         int tabY = 35;
         int tabGap = 4;
@@ -58,24 +60,24 @@ public final class TerminalScreen extends Screen {
         int tabX = contentX + (contentWidth - tabsWidth) / 2;
 
         this.problemTabButton = addRenderableWidget(
-            Button.builder(Component.literal("Problem"), button -> switchTab(Tab.PROBLEM))
+            Button.builder(Component.literal("問題"), button -> switchTab(Tab.PROBLEM))
                 .bounds(tabX, tabY, tabWidth, 20)
                 .build()
         );
         this.codeTabButton = addRenderableWidget(
-            Button.builder(Component.literal("Code"), button -> switchTab(Tab.CODE))
+            Button.builder(Component.literal("コード"), button -> switchTab(Tab.CODE))
                 .bounds(tabX + tabWidth + tabGap, tabY, tabWidth, 20)
                 .build()
         );
         this.judgeTabButton = addRenderableWidget(
-            Button.builder(Component.literal("Judge"), button -> switchTab(Tab.JUDGE))
+            Button.builder(Component.literal("判定"), button -> switchTab(Tab.JUDGE))
                 .bounds(tabX + (tabWidth + tabGap) * 2, tabY, tabWidth, 20)
                 .build()
         );
 
-        int panelY = 66;
+        int panelY = panelTop();
         int bottomY = this.height - 24;
-        int panelBottom = bottomY - 8;
+        int panelBottom = panelBottom();
         int stdinHeight = 42;
         int stdinGap = 18;
         int codeHeight = Math.max(50, panelBottom - panelY - stdinHeight - stdinGap);
@@ -87,8 +89,8 @@ public final class TerminalScreen extends Screen {
             panelY,
             contentWidth,
             codeHeight,
-            Component.literal("Python code"),
-            Component.literal("Python code editor")
+            Component.literal("Python コード"),
+            Component.literal("Python コード入力欄")
         );
         this.codeBox.setCharacterLimit(32_000);
         addRenderableWidget(this.codeBox);
@@ -99,8 +101,8 @@ public final class TerminalScreen extends Screen {
             stdinY,
             contentWidth,
             stdinHeight,
-            Component.literal("stdin"),
-            Component.literal("Standard input")
+            Component.literal("標準入力"),
+            Component.literal("標準入力")
         );
         this.stdinBox.setCharacterLimit(32_000);
         addRenderableWidget(this.stdinBox);
@@ -109,35 +111,35 @@ public final class TerminalScreen extends Screen {
         int buttonWidth = 76;
 
         this.previousProblemButton = addRenderableWidget(
-            Button.builder(Component.literal("< Prev"), button -> changeProblem(-1))
+            Button.builder(Component.literal("< 前へ"), button -> changeProblem(-1))
                 .bounds(contentX, bottomY, buttonWidth, 20)
                 .build()
         );
         this.nextProblemButton = addRenderableWidget(
-            Button.builder(Component.literal("Next >"), button -> changeProblem(1))
+            Button.builder(Component.literal("次へ >"), button -> changeProblem(1))
                 .bounds(contentX + buttonWidth + gap, bottomY, buttonWidth, 20)
                 .build()
         );
 
         this.runButton = addRenderableWidget(
-            Button.builder(Component.literal("Run"), button -> runCode())
+            Button.builder(Component.literal("実行"), button -> runCode())
                 .bounds(contentX, bottomY, buttonWidth, 20)
                 .build()
         );
 
         this.sampleButton = addRenderableWidget(
-            Button.builder(Component.literal("Sample"), button -> runJudge(currentSamples(), "Sample"))
+            Button.builder(Component.literal("サンプル"), button -> runJudge(currentSamples(), "サンプル"))
                 .bounds(contentX, bottomY, buttonWidth, 20)
                 .build()
         );
         this.submitButton = addRenderableWidget(
-            Button.builder(Component.literal("Submit"), button -> runJudge(currentTests(), "Submit"))
+            Button.builder(Component.literal("提出"), button -> runJudge(currentTests(), "提出"))
                 .bounds(contentX + buttonWidth + gap, bottomY, buttonWidth, 20)
                 .build()
         );
 
         this.refreshButton = addRenderableWidget(
-            Button.builder(Component.literal("Refresh"), button -> {
+            Button.builder(Component.literal("再読込"), button -> {
                 RunnerClient.checkNow();
                 loadProblemList();
             })
@@ -145,7 +147,7 @@ public final class TerminalScreen extends Screen {
                 .build()
         );
         this.closeButton = addRenderableWidget(
-            Button.builder(Component.literal("Close"), button -> onClose())
+            Button.builder(Component.literal("閉じる"), button -> onClose())
                 .bounds(contentX + contentWidth - buttonWidth, bottomY, buttonWidth, 20)
                 .build()
         );
@@ -153,6 +155,22 @@ public final class TerminalScreen extends Screen {
         applyTabVisibility();
         updateActionButtons();
         loadProblemList();
+    }
+
+    private int contentWidth() {
+        return Math.min(this.width - 24, 720);
+    }
+
+    private int contentX() {
+        return (this.width - contentWidth()) / 2;
+    }
+
+    private int panelTop() {
+        return 66;
+    }
+
+    private int panelBottom() {
+        return this.height - 32;
     }
 
     private void loadProblemList() {
@@ -174,7 +192,7 @@ public final class TerminalScreen extends Screen {
                     this.problems = List.of();
                     this.currentProblem = null;
                     this.problemIndex = -1;
-                    this.problemError = "Failed to load problems: " + rootMessage(error);
+                    this.problemError = "問題一覧の読み込みに失敗しました: " + rootMessage(error);
                     updateActionButtons();
                     return;
                 }
@@ -183,7 +201,7 @@ public final class TerminalScreen extends Screen {
                 if (loaded.isEmpty()) {
                     this.currentProblem = null;
                     this.problemIndex = -1;
-                    this.problemError = "No problems found in the problems directory.";
+                    this.problemError = "problems フォルダーに問題がありません。";
                     updateActionButtons();
                     return;
                 }
@@ -219,7 +237,7 @@ public final class TerminalScreen extends Screen {
             this.minecraft.execute(() -> {
                 this.loadingProblems = false;
                 if (error != null) {
-                    this.problemError = "Failed to load " + summary.title() + ": " + rootMessage(error);
+                    this.problemError = summary.title() + " の読み込みに失敗しました: " + rootMessage(error);
                     updateActionButtons();
                     return;
                 }
@@ -227,6 +245,7 @@ public final class TerminalScreen extends Screen {
                 this.problemIndex = index;
                 this.currentProblem = problem;
                 this.problemError = "";
+                this.problemScroll = 0;
 
                 String code = this.codeDrafts.getOrDefault(problem.id(), problem.defaultCode());
                 this.codeBox.setValue(code);
@@ -237,7 +256,7 @@ public final class TerminalScreen extends Screen {
                 }
                 this.stdinBox.setValue(stdin);
 
-                this.resultText = "No judge result yet for " + problem.title() + ".";
+                this.resultText = problem.title() + " はまだ判定していません。";
                 this.resultColor = 0xA0A0A0;
                 updateActionButtons();
             });
@@ -313,13 +332,14 @@ public final class TerminalScreen extends Screen {
             this.sampleButton.active = available && !currentSamples().isEmpty();
             this.submitButton.active = available && !currentTests().isEmpty();
             this.previousProblemButton.active = loaded && this.problemIndex > 0;
-            this.nextProblemButton.active = loaded && this.problemIndex >= 0 && this.problemIndex + 1 < this.problems.size();
+            this.nextProblemButton.active =
+                loaded && this.problemIndex >= 0 && this.problemIndex + 1 < this.problems.size();
         }
     }
 
     private void setBusy(boolean busy, String label) {
         this.running = busy;
-        this.runButton.setMessage(Component.literal(busy ? label : "Run"));
+        this.runButton.setMessage(Component.literal(busy ? label : "実行"));
         updateActionButtons();
     }
 
@@ -329,8 +349,8 @@ public final class TerminalScreen extends Screen {
         }
 
         saveDrafts();
-        setBusy(true, "Running...");
-        this.resultText = "Running...";
+        setBusy(true, "実行中...");
+        this.resultText = "実行中...";
         this.resultColor = 0xE0E0E0;
 
         RunnerClient.run(this.codeBox.getValue(), this.stdinBox.getValue())
@@ -340,7 +360,7 @@ public final class TerminalScreen extends Screen {
                 }
 
                 this.minecraft.execute(() -> {
-                    setBusy(false, "Run");
+                    setBusy(false, "実行");
                     if (error != null) {
                         showRunnerError(error);
                     } else {
@@ -359,8 +379,8 @@ public final class TerminalScreen extends Screen {
         }
 
         saveDrafts();
-        setBusy(true, mode + "...");
-        this.resultText = mode + " judging " + this.currentProblem.title() + "...";
+        setBusy(true, mode + "中...");
+        this.resultText = mode + "を判定中...";
         this.resultColor = 0xE0E0E0;
         runJudgeCase(tests, 0, new StringBuilder(), true);
     }
@@ -375,7 +395,7 @@ public final class TerminalScreen extends Screen {
             boolean accepted = allAccepted;
             if (this.minecraft != null) {
                 this.minecraft.execute(() -> {
-                    setBusy(false, "Run");
+                    setBusy(false, "実行");
                     this.resultText = report.toString();
                     this.resultColor = accepted ? 0x55FF55 : 0xFFAA55;
                 });
@@ -389,7 +409,7 @@ public final class TerminalScreen extends Screen {
                 if (error != null) {
                     if (this.minecraft != null) {
                         this.minecraft.execute(() -> {
-                            setBusy(false, "Run");
+                            setBusy(false, "実行");
                             showRunnerError(error);
                         });
                     }
@@ -405,8 +425,8 @@ public final class TerminalScreen extends Screen {
                     .append('\n');
 
                 if (verdict == Verdict.WA) {
-                    report.append(" expected: ").append(oneLine(test.expected())).append('\n');
-                    report.append(" actual:   ").append(oneLine(result.stdout())).append('\n');
+                    report.append(" 期待値: ").append(oneLine(test.expected())).append('\n');
+                    report.append(" 実際:   ").append(oneLine(result.stdout())).append('\n');
                 } else if (verdict == Verdict.RE && !result.stderr().isBlank()) {
                     report.append(" ").append(oneLine(result.stderr())).append('\n');
                 }
@@ -437,27 +457,27 @@ public final class TerminalScreen extends Screen {
     private void showRunResult(RunnerClient.RunResult result) {
         StringBuilder text = new StringBuilder();
         if (!result.stdout().isEmpty()) {
-            text.append("stdout:\n").append(result.stdout());
+            text.append("標準出力:\n").append(result.stdout());
         }
         if (!result.stderr().isEmpty()) {
             if (!text.isEmpty()) {
                 text.append("\n");
             }
-            text.append("stderr:\n").append(result.stderr());
+            text.append("標準エラー:\n").append(result.stderr());
         }
         if (text.isEmpty()) {
-            text.append("(no output)");
+            text.append("(出力なし)");
         }
 
         text.append("\n\n");
         if (result.timedOut()) {
             text.append("TLE");
         } else {
-            text.append("exit=").append(result.exitCode());
+            text.append("終了コード=").append(result.exitCode());
         }
         text.append("  ").append(String.format("%.3f ms", result.elapsedMs()));
         if (result.outputTruncated()) {
-            text.append("  [output truncated]");
+            text.append("  [出力を省略しました]");
         }
 
         this.resultText = text.toString();
@@ -467,7 +487,7 @@ public final class TerminalScreen extends Screen {
     }
 
     private void showRunnerError(Throwable error) {
-        this.resultText = "Runner error:\n" + rootMessage(error);
+        this.resultText = "Runner エラー:\n" + rootMessage(error);
         this.resultColor = 0xFF5555;
         RunnerClient.checkNow();
     }
@@ -486,110 +506,258 @@ public final class TerminalScreen extends Screen {
         renderBackground(graphics, mouseX, mouseY, partialTick);
         super.render(graphics, mouseX, mouseY, partialTick);
 
-        int margin = 12;
-        int contentWidth = Math.min(this.width - margin * 2, 720);
-        int contentX = (this.width - contentWidth) / 2;
-        int panelY = 66;
-        int panelBottom = this.height - 32;
+        int contentWidth = contentWidth();
+        int contentX = contentX();
+        int panelY = panelTop();
+        int panelBottom = panelBottom();
 
         RunnerClient.Status runnerStatus = RunnerClient.getStatus();
         graphics.drawString(this.font, TITLE, contentX, 12, 0xFFFFFF);
+        String statusLabel = runnerStatus.label();
         graphics.drawString(
             this.font,
-            Component.literal(runnerStatus.label()),
-            contentX + contentWidth - this.font.width(runnerStatus.label()),
+            Component.literal(statusLabel),
+            contentX + contentWidth - this.font.width(statusLabel),
             12,
             runnerStatus.color()
         );
 
         switch (this.currentTab) {
-            case PROBLEM -> renderProblem(graphics, contentX, panelY, contentWidth);
+            case PROBLEM -> renderProblem(graphics, contentX, panelY, contentWidth, panelBottom);
             case CODE -> renderCodeLabels(graphics, contentX);
             case JUDGE -> renderJudge(graphics, contentX, panelY, contentWidth, panelBottom);
         }
     }
 
-    private void renderProblem(GuiGraphics graphics, int x, int y, int width) {
+    private void renderProblem(GuiGraphics graphics, int x, int y, int width, int bottom) {
         if (this.loadingProblems) {
-            graphics.drawString(this.font, Component.literal("Loading problems..."), x, y, 0xE0E0E0);
+            graphics.drawString(this.font, Component.literal("問題を読み込み中..."), x, y, 0xE0E0E0);
+            return;
+        }
+        if (!this.problemError.isEmpty()) {
+            graphics.drawWordWrap(this.font, Component.literal(this.problemError), x, y, width, 0xFF5555);
             return;
         }
         if (this.currentProblem == null) {
-            String message = this.problemError.isBlank() ? "No problem loaded." : this.problemError;
-            graphics.drawWordWrap(this.font, Component.literal(message), x, y, width, 0xFF5555);
+            graphics.drawString(this.font, Component.literal("問題が読み込まれていません。"), x, y, 0xA0A0A0);
             return;
         }
 
-        String position = (this.problemIndex + 1) + " / " + this.problems.size();
         graphics.drawString(this.font, Component.literal(this.currentProblem.title()), x, y, 0xFFFF55);
+        String counter = (this.problemIndex + 1) + " / " + this.problems.size();
         graphics.drawString(
             this.font,
-            Component.literal(position),
-            x + width - this.font.width(position),
+            Component.literal(counter),
+            x + width - this.font.width(counter) - 8,
             y,
-            0xAAAAAA
-        );
-        graphics.drawWordWrap(
-            this.font,
-            Component.literal(this.currentProblem.statement()),
-            x,
-            y + 18,
-            width,
-            0xE0E0E0
+            0xA0A0A0
         );
 
-        int sampleY = y + 62;
-        if (this.currentProblem.samples().isEmpty()) {
-            graphics.drawString(this.font, Component.literal("No samples."), x, sampleY, 0xAAAAAA);
-            return;
+        int viewportTop = y + 16;
+        int viewportBottom = bottom;
+        int viewportHeight = Math.max(1, viewportBottom - viewportTop);
+
+        graphics.fill(x, viewportTop, x + width, viewportBottom, 0x33000000);
+        graphics.enableScissor(x, viewportTop, x + width, viewportBottom);
+
+        int cursorY = viewportTop + 6 - this.problemScroll;
+        int startY = cursorY;
+        cursorY = renderStatement(graphics, this.currentProblem.statement(), x + 7, cursorY, width - 22);
+
+        List<RunnerClient.TestCase> samples = this.currentProblem.samples();
+        for (int i = 0; i < samples.size(); i++) {
+            RunnerClient.TestCase sample = samples.get(i);
+            cursorY += 8;
+            graphics.drawString(
+                this.font,
+                Component.literal("サンプル " + (i + 1)),
+                x + 7,
+                cursorY,
+                0xFFFF55
+            );
+            cursorY += 15;
+
+            cursorY = renderCodeBlock(
+                graphics,
+                "入力",
+                sample.stdin(),
+                x + 7,
+                cursorY,
+                width - 22
+            );
+            cursorY += 7;
+            cursorY = renderCodeBlock(
+                graphics,
+                "出力",
+                sample.expected(),
+                x + 7,
+                cursorY,
+                width - 22
+            );
         }
 
-        RunnerClient.TestCase sample = this.currentProblem.samples().get(0);
-        graphics.drawString(this.font, Component.literal("Sample Input"), x, sampleY, 0xAAAAAA);
-        graphics.fill(x, sampleY + 12, x + width, sampleY + 42, 0x66000000);
-        drawMultiline(graphics, sample.stdin(), x + 5, sampleY + 18, width - 10, 2, 0xFFFFFF);
+        this.problemContentHeight = Math.max(0, cursorY - startY + 8);
+        graphics.disableScissor();
 
-        int outputY = sampleY + 50;
-        graphics.drawString(this.font, Component.literal("Sample Output"), x, outputY, 0xAAAAAA);
-        graphics.fill(x, outputY + 12, x + width, outputY + 42, 0x66000000);
-        drawMultiline(graphics, sample.expected(), x + 5, outputY + 18, width - 10, 2, 0xFFFFFF);
+        int maxScroll = Math.max(0, this.problemContentHeight - viewportHeight);
+        if (this.problemScroll > maxScroll) {
+            this.problemScroll = maxScroll;
+        }
+
+        if (maxScroll > 0) {
+            int trackX = x + width - 5;
+            graphics.fill(trackX, viewportTop, trackX + 3, viewportBottom, 0x55000000);
+            int thumbHeight = Math.max(16, viewportHeight * viewportHeight / this.problemContentHeight);
+            int travel = viewportHeight - thumbHeight;
+            int thumbY = viewportTop + (int) ((long) this.problemScroll * travel / maxScroll);
+            graphics.fill(trackX, thumbY, trackX + 3, thumbY + thumbHeight, 0xFFAAAAAA);
+        }
+    }
+
+    private int renderStatement(GuiGraphics graphics, String statement, int x, int y, int width) {
+        String normalized = statement.replace("\r\n", "\n").replace('\r', '\n');
+        for (String rawLine : normalized.split("\n", -1)) {
+            String line = rawLine.stripTrailing();
+
+            if (line.isBlank()) {
+                y += 7;
+                continue;
+            }
+
+            if (line.startsWith("## ")) {
+                y += 4;
+                graphics.drawString(
+                    this.font,
+                    Component.literal(line.substring(3)),
+                    x,
+                    y,
+                    0xFFFF55
+                );
+                y += 15;
+                continue;
+            }
+
+            String visibleLine = line.startsWith("- ") ? "・" + line.substring(2) : line;
+            List<FormattedCharSequence> wrapped =
+                this.font.split(Component.literal(visibleLine), Math.max(20, width));
+            for (FormattedCharSequence part : wrapped) {
+                graphics.drawString(this.font, part, x, y, 0xE0E0E0);
+                y += this.font.lineHeight + 2;
+            }
+        }
+        return y;
+    }
+
+    private int renderCodeBlock(
+        GuiGraphics graphics,
+        String label,
+        String text,
+        int x,
+        int y,
+        int width
+    ) {
+        graphics.drawString(this.font, Component.literal(label), x, y, 0xAAAAAA);
+        y += 12;
+
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').stripTrailing();
+        String[] sourceLines = normalized.isEmpty() ? new String[] {""} : normalized.split("\n", -1);
+
+        int blockHeight = 8;
+        for (String sourceLine : sourceLines) {
+            List<FormattedCharSequence> wrapped =
+                this.font.split(Component.literal(sourceLine), Math.max(20, width - 10));
+            blockHeight += Math.max(1, wrapped.size()) * (this.font.lineHeight + 1);
+        }
+        blockHeight += 4;
+
+        graphics.fill(x, y, x + width, y + blockHeight, 0x66000000);
+
+        int textY = y + 5;
+        for (String sourceLine : sourceLines) {
+            List<FormattedCharSequence> wrapped =
+                this.font.split(Component.literal(sourceLine), Math.max(20, width - 10));
+            if (wrapped.isEmpty()) {
+                textY += this.font.lineHeight + 1;
+            } else {
+                for (FormattedCharSequence part : wrapped) {
+                    graphics.drawString(this.font, part, x + 5, textY, 0xFFFFFF);
+                    textY += this.font.lineHeight + 1;
+                }
+            }
+        }
+
+        return y + blockHeight;
     }
 
     private void renderCodeLabels(GuiGraphics graphics, int x) {
-        if (this.currentProblem != null) {
-            graphics.drawString(this.font, Component.literal(this.currentProblem.title()), x, 56, 0xAAAAAA);
-        }
-        graphics.drawString(this.font, Component.literal("Python"), x, this.codeBox.getY() - 12, 0xE0E0E0);
-        graphics.drawString(this.font, Component.literal("stdin"), x, this.stdinBox.getY() - 12, 0xE0E0E0);
+        graphics.drawString(
+            this.font,
+            Component.literal("Python コード"),
+            x,
+            this.codeBox.getY() - 12,
+            0xE0E0E0
+        );
+        graphics.drawString(
+            this.font,
+            Component.literal("標準入力"),
+            x,
+            this.stdinBox.getY() - 12,
+            0xE0E0E0
+        );
     }
 
     private void renderJudge(GuiGraphics graphics, int x, int y, int width, int bottom) {
-        String heading = this.currentProblem == null ? "Output / Judge" : "Output / Judge - " + this.currentProblem.title();
-        graphics.drawString(this.font, Component.literal(heading), x, y - 12, 0xE0E0E0);
+        graphics.drawString(this.font, Component.literal("出力 / 判定"), x, y - 12, 0xE0E0E0);
         graphics.fill(x, y, x + width, bottom, 0x66000000);
         renderOutput(graphics, x + 6, y + 6, width - 12, bottom - y - 12);
-    }
-
-    private void drawMultiline(GuiGraphics graphics, String text, int x, int y, int width, int maxLines, int color) {
-        List<FormattedCharSequence> lines = this.font.split(Component.literal(text.stripTrailing()), Math.max(10, width));
-        int count = Math.min(maxLines, lines.size());
-        for (int i = 0; i < count; i++) {
-            graphics.drawString(this.font, lines.get(i), x, y + i * (this.font.lineHeight + 1), color);
-        }
     }
 
     private void renderOutput(GuiGraphics graphics, int x, int y, int width, int height) {
         int lineHeight = this.font.lineHeight + 1;
         int maxLines = Math.max(1, height / lineHeight);
-        List<FormattedCharSequence> lines = this.font.split(Component.literal(this.resultText), Math.max(10, width));
+        List<FormattedCharSequence> lines =
+            this.font.split(Component.literal(this.resultText), Math.max(10, width));
 
         int count = Math.min(maxLines, lines.size());
         for (int i = 0; i < count; i++) {
             graphics.drawString(this.font, lines.get(i), x, y + i * lineHeight, this.resultColor);
         }
+
         if (lines.size() > maxLines && maxLines > 0) {
-            graphics.drawString(this.font, "...", x, y + (maxLines - 1) * lineHeight, 0xA0A0A0);
+            graphics.drawString(
+                this.font,
+                "...",
+                x,
+                y + (maxLines - 1) * lineHeight,
+                0xA0A0A0
+            );
         }
+    }
+
+    @Override
+    public boolean mouseScrolled(
+        double mouseX,
+        double mouseY,
+        double horizontalAmount,
+        double verticalAmount
+    ) {
+        if (this.currentTab == Tab.PROBLEM) {
+            int x = contentX();
+            int width = contentWidth();
+            int top = panelTop() + 16;
+            int bottom = panelBottom();
+
+            if (mouseX >= x && mouseX < x + width && mouseY >= top && mouseY < bottom) {
+                int viewportHeight = Math.max(1, bottom - top);
+                int maxScroll = Math.max(0, this.problemContentHeight - viewportHeight);
+                if (maxScroll > 0) {
+                    int delta = (int) Math.round(verticalAmount * 24.0);
+                    this.problemScroll = Math.max(0, Math.min(maxScroll, this.problemScroll - delta));
+                    return true;
+                }
+            }
+        }
+        return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
     }
 
     @Override
@@ -616,7 +784,7 @@ public final class TerminalScreen extends Screen {
         }
 
         public String label() {
-            return label;
+            return this.label;
         }
     }
 }
