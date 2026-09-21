@@ -11,8 +11,13 @@ public class AtCrafterClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+            if (!world.isClientSide()) {
+                return InteractionResult.PASS;
+            }
+
             if (world.getBlockState(hitResult.getBlockPos()).is(ModBlocks.TERMINAL)) {
-                Minecraft.getInstance().setScreen(new TerminalScreen());
+                Minecraft minecraft = Minecraft.getInstance();
+                minecraft.execute(() -> minecraft.setScreen(new TerminalScreen()));
                 return InteractionResult.SUCCESS;
             }
 
