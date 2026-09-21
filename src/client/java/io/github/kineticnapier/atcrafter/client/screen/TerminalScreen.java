@@ -12,6 +12,7 @@ import net.minecraft.util.FormattedCharSequence;
 public final class TerminalScreen extends Screen {
     private static final Component TITLE = Component.literal("AtCrafter");
     private static final String PROBLEM_TITLE = "A - Sum";
+    private static final String PROBLEM_TEXT = "Sum all integers from one line and print the result.";
 
     private static final List<TestCase> SAMPLE_TESTS = List.of(
         new TestCase("Sample 1", "1 2 3 4 5\n", "15\n")
@@ -24,14 +25,21 @@ public final class TerminalScreen extends Screen {
         new TestCase("Test 4", "100 200 300 400\n", "1000\n")
     );
 
+    private Tab currentTab = Tab.CODE;
+
     private MultiLineEditBox codeBox;
     private MultiLineEditBox stdinBox;
+    private Button problemTabButton;
+    private Button codeTabButton;
+    private Button judgeTabButton;
     private Button runButton;
     private Button sampleButton;
     private Button submitButton;
+    private Button refreshButton;
+    private Button closeButton;
 
     private boolean running;
-    private String resultText = "Run some Python code.";
+    private String resultText = "No judge result yet.";
     private int resultColor = 0xA0A0A0;
 
     public TerminalScreen() {
@@ -40,26 +48,45 @@ public final class TerminalScreen extends Screen {
 
     @Override
     protected void init() {
-        int margin = 10;
-        int gap = 8;
-        int contentWidth = Math.min(this.width - margin * 2, 760);
+        int margin = 12;
+        int contentWidth = Math.min(this.width - margin * 2, 720);
         int contentX = (this.width - contentWidth) / 2;
-        int leftWidth = Math.max(120, (contentWidth - 12) / 2);
-        int rightX = contentX + leftWidth + 12;
-        int rightWidth = contentWidth - leftWidth - 12;
 
-        int codeY = 68;
-        int controlsY = this.height - 24;
-        int editorBottom = controlsY - 8;
-        int stdinHeight = 36;
-        int codeHeight = Math.max(45, editorBottom - codeY - stdinHeight - 22);
-        int stdinY = codeY + codeHeight + 17;
+        int tabY = 35;
+        int tabGap = 4;
+        int tabWidth = Math.min(100, (contentWidth - tabGap * 2) / 3);
+        int tabsWidth = tabWidth * 3 + tabGap * 2;
+        int tabX = contentX + (contentWidth - tabsWidth) / 2;
+
+        this.problemTabButton = addRenderableWidget(
+            Button.builder(Component.literal("Problem"), button -> switchTab(Tab.PROBLEM))
+                .bounds(tabX, tabY, tabWidth, 20)
+                .build()
+        );
+        this.codeTabButton = addRenderableWidget(
+            Button.builder(Component.literal("Code"), button -> switchTab(Tab.CODE))
+                .bounds(tabX + tabWidth + tabGap, tabY, tabWidth, 20)
+                .build()
+        );
+        this.judgeTabButton = addRenderableWidget(
+            Button.builder(Component.literal("Judge"), button -> switchTab(Tab.JUDGE))
+                .bounds(tabX + (tabWidth + tabGap) * 2, tabY, tabWidth, 20)
+                .build()
+        );
+
+        int panelY = 66;
+        int bottomY = this.height - 24;
+        int panelBottom = bottomY - 8;
+        int stdinHeight = 42;
+        int stdinGap = 18;
+        int codeHeight = Math.max(50, panelBottom - panelY - stdinHeight - stdinGap);
+        int stdinY = panelY + codeHeight + stdinGap;
 
         this.codeBox = new MultiLineEditBox(
             this.font,
             contentX,
-            codeY,
-            leftWidth,
+            panelY,
+            contentWidth,
             codeHeight,
             Component.literal("Python code"),
             Component.literal("Python code editor")
@@ -72,7 +99,7 @@ public final class TerminalScreen extends Screen {
             this.font,
             contentX,
             stdinY,
-            leftWidth,
+            contentWidth,
             stdinHeight,
             Component.literal("stdin"),
             Component.literal("Standard input")
@@ -81,42 +108,66 @@ public final class TerminalScreen extends Screen {
         this.stdinBox.setValue("1 2 3 4 5");
         addRenderableWidget(this.stdinBox);
 
-        int buttonCount = 5;
-        int buttonWidth = Math.max(50, Math.min(90, (contentWidth - gap * (buttonCount - 1)) / buttonCount));
-        int totalButtonWidth = buttonWidth * buttonCount + gap * (buttonCount - 1);
-        int buttonX = contentX + (contentWidth - totalButtonWidth) / 2;
+        int smallGap = 6;
+        int smallWidth = Math.min(86, Math.max(58, (contentWidth - smallGap * 3) / 4));
 
         this.runButton = addRenderableWidget(
             Button.builder(Component.literal("Run"), button -> runCode())
-                .bounds(buttonX, controlsY, buttonWidth, 20)
+                .bounds(contentX, bottomY, smallWidth, 20)
                 .build()
         );
 
         this.sampleButton = addRenderableWidget(
             Button.builder(Component.literal("Sample"), button -> runJudge(SAMPLE_TESTS, "Sample"))
-                .bounds(buttonX + (buttonWidth + gap), controlsY, buttonWidth, 20)
+                .bounds(contentX, bottomY, smallWidth, 20)
                 .build()
         );
 
         this.submitButton = addRenderableWidget(
             Button.builder(Component.literal("Submit"), button -> runJudge(SUBMIT_TESTS, "Submit"))
-                .bounds(buttonX + (buttonWidth + gap) * 2, controlsY, buttonWidth, 20)
+                .bounds(contentX + smallWidth + smallGap, bottomY, smallWidth, 20)
                 .build()
         );
 
-        addRenderableWidget(
+        this.refreshButton = addRenderableWidget(
             Button.builder(Component.literal("Refresh"), button -> RunnerClient.checkNow())
-                .bounds(buttonX + (buttonWidth + gap) * 3, controlsY, buttonWidth, 20)
+                .bounds(contentX + contentWidth - smallWidth * 2 - smallGap, bottomY, smallWidth, 20)
                 .build()
         );
 
-        addRenderableWidget(
+        this.closeButton = addRenderableWidget(
             Button.builder(Component.literal("Close"), button -> onClose())
-                .bounds(buttonX + (buttonWidth + gap) * 4, controlsY, buttonWidth, 20)
+                .bounds(contentX + contentWidth - smallWidth, bottomY, smallWidth, 20)
                 .build()
         );
 
+        applyTabVisibility();
         updateActionButtons();
+    }
+
+    private void switchTab(Tab tab) {
+        this.currentTab = tab;
+        applyTabVisibility();
+    }
+
+    private void applyTabVisibility() {
+        if (this.codeBox == null) {
+            return;
+        }
+
+        boolean code = this.currentTab == Tab.CODE;
+        boolean judge = this.currentTab == Tab.JUDGE;
+
+        this.codeBox.visible = code;
+        this.stdinBox.visible = code;
+        this.runButton.visible = code;
+
+        this.sampleButton.visible = judge;
+        this.submitButton.visible = judge;
+
+        this.problemTabButton.active = this.currentTab != Tab.PROBLEM;
+        this.codeTabButton.active = this.currentTab != Tab.CODE;
+        this.judgeTabButton.active = this.currentTab != Tab.JUDGE;
     }
 
     @Override
@@ -160,10 +211,14 @@ public final class TerminalScreen extends Screen {
 
                     if (error != null) {
                         showRunnerError(error);
+                        this.currentTab = Tab.JUDGE;
+                        applyTabVisibility();
                         return;
                     }
 
                     showRunResult(result);
+                    this.currentTab = Tab.JUDGE;
+                    applyTabVisibility();
                 });
             });
     }
@@ -298,46 +353,53 @@ public final class TerminalScreen extends Screen {
         renderBackground(graphics, mouseX, mouseY, partialTick);
         super.render(graphics, mouseX, mouseY, partialTick);
 
-        int margin = 10;
-        int contentWidth = Math.min(this.width - margin * 2, 760);
+        int margin = 12;
+        int contentWidth = Math.min(this.width - margin * 2, 720);
         int contentX = (this.width - contentWidth) / 2;
-        int leftWidth = Math.max(120, (contentWidth - 12) / 2);
-        int rightX = contentX + leftWidth + 12;
-        int rightWidth = contentWidth - leftWidth - 12;
-        int codeY = 68;
-        int controlsY = this.height - 24;
-        int editorBottom = controlsY - 8;
-        RunnerClient.Status runnerStatus = RunnerClient.getStatus();
+        int panelY = 66;
+        int panelBottom = this.height - 32;
 
-        graphics.drawCenteredString(this.font, TITLE, this.width / 2, 8, 0xFFFFFF);
-        graphics.drawCenteredString(
+        RunnerClient.Status runnerStatus = RunnerClient.getStatus();
+        graphics.drawString(this.font, TITLE, contentX, 12, 0xFFFFFF);
+        graphics.drawString(
             this.font,
             Component.literal(runnerStatus.label()),
-            this.width / 2,
-            21,
+            contentX + contentWidth - this.font.width(runnerStatus.label()),
+            12,
             runnerStatus.color()
         );
-        graphics.drawCenteredString(
-            this.font,
-            Component.literal("Problem: " + PROBLEM_TITLE + "  |  Sum all integers from one line"),
-            this.width / 2,
-            36,
-            0xFFFF55
-        );
-        graphics.drawCenteredString(
-            this.font,
-            Component.literal("Sample: 1 2 3 4 5  ->  15"),
-            this.width / 2,
-            48,
-            0xA0A0A0
-        );
 
-        graphics.drawString(this.font, Component.literal("Code"), contentX, codeY - 12, 0xE0E0E0);
-        graphics.drawString(this.font, Component.literal("stdin"), contentX, this.stdinBox.getY() - 12, 0xE0E0E0);
-        graphics.drawString(this.font, Component.literal("Output / Judge"), rightX, codeY - 12, 0xE0E0E0);
+        switch (this.currentTab) {
+            case PROBLEM -> renderProblem(graphics, contentX, panelY, contentWidth);
+            case CODE -> renderCodeLabels(graphics, contentX);
+            case JUDGE -> renderJudge(graphics, contentX, panelY, contentWidth, panelBottom);
+        }
+    }
 
-        graphics.fill(rightX, codeY, rightX + rightWidth, editorBottom, 0x66000000);
-        renderOutput(graphics, rightX + 5, codeY + 5, rightWidth - 10, editorBottom - codeY - 10);
+    private void renderProblem(GuiGraphics graphics, int x, int y, int width) {
+        graphics.drawString(this.font, Component.literal(PROBLEM_TITLE), x, y, 0xFFFF55);
+        graphics.drawWordWrap(this.font, Component.literal(PROBLEM_TEXT), x, y + 18, width, 0xE0E0E0);
+
+        int sampleY = y + 52;
+        graphics.drawString(this.font, Component.literal("Sample Input"), x, sampleY, 0xAAAAAA);
+        graphics.fill(x, sampleY + 12, x + width, sampleY + 34, 0x66000000);
+        graphics.drawString(this.font, Component.literal("1 2 3 4 5"), x + 5, sampleY + 18, 0xFFFFFF);
+
+        int outputY = sampleY + 48;
+        graphics.drawString(this.font, Component.literal("Sample Output"), x, outputY, 0xAAAAAA);
+        graphics.fill(x, outputY + 12, x + width, outputY + 34, 0x66000000);
+        graphics.drawString(this.font, Component.literal("15"), x + 5, outputY + 18, 0xFFFFFF);
+    }
+
+    private void renderCodeLabels(GuiGraphics graphics, int x) {
+        graphics.drawString(this.font, Component.literal("Python"), x, this.codeBox.getY() - 12, 0xE0E0E0);
+        graphics.drawString(this.font, Component.literal("stdin"), x, this.stdinBox.getY() - 12, 0xE0E0E0);
+    }
+
+    private void renderJudge(GuiGraphics graphics, int x, int y, int width, int bottom) {
+        graphics.drawString(this.font, Component.literal("Output / Judge"), x, y - 12, 0xE0E0E0);
+        graphics.fill(x, y, x + width, bottom, 0x66000000);
+        renderOutput(graphics, x + 6, y + 6, width - 12, bottom - y - 12);
     }
 
     private void renderOutput(GuiGraphics graphics, int x, int y, int width, int height) {
@@ -361,6 +423,12 @@ public final class TerminalScreen extends Screen {
     }
 
     private record TestCase(String name, String stdin, String expected) {
+    }
+
+    private enum Tab {
+        PROBLEM,
+        CODE,
+        JUDGE
     }
 
     private enum Verdict {
