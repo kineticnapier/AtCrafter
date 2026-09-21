@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+HOST = "127.0.0.1"
+PORT = 8765
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_OUTPUT_CHARS = 1_000_000
+DEFAULT_TIMEOUT_MS = 2_000
+MAX_TIMEOUT_MS = 10_000
+
+
+def json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def clamp_timeout(value: Any) -> int:
+    if not isinstance(value, int):
+        return DEFAULT_TIMEOUT_MS
+    return max(100, min(value, MAX_TIMEOUT_MS))
+
+
+def truncate(text: str) -> tuple[str, bool]:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text, False
+    return text[:MAX_OUTPUT_CHARS], True
+
+
+def run_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
+    started = time.perf_counter()
+
+    with tempfile.TemporaryDirectory(prefix="atcrafter-") as temp_dir:
+        script_path = os.path.join(temp_dir, "main.py")
+        with open(script_path, "w", encoding="utf-8", newline="\n") as script:
+            script.write(code)
+
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            process = subprocess.run(
+                [sys.executable, script_path],
+                input=stdin,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=temp_dir,
+                env=env,
+                timeout=timeout_ms / 1000.0,
+                check=False,
+            )
+
+            stdout, stdout_truncated = truncate(process.stdout)
+            stderr, stderr_truncated = truncate(process.stderr)
+
+            return {
+                "status": "finished",
+                "exitCode": process.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
+                "timedOut": False,
+                "outputTruncated": stdout_truncated or stderr_truncated,
+            }
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+
+            stdout, stdout_truncated = truncate(stdout)
+            stderr, stderr_truncated = truncate(stderr)
+
+            return {
+                "status": "timed_out",
+                "exitCode": None,
+                "stdout": stdout,
+                "stderr": stderr,
+                "elapsedMs": round((time.perf_counter() - started) * 1000, 3),
+                "timedOut": True,
+                "outputTruncated": stdout_truncated or stderr_truncated,
+            }
+
+
+class RunnerHandler(BaseHTTPRequestHandler):
+    server_version = "AtCrafterRunner/0.1"
+
+    def log_message(self, format: str, *args: object) -> None:
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
+    def send_json(self, status: int, value: Any) -> None:
+        body = json_bytes(value)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self.send_json(
+                200,
+                {
+                    "status": "ok",
+                    "runnerVersion": "0.1",
+                    "python": sys.version.split()[0],
+                },
+            )
+            return
+
+        self.send_json(404, {"error": "not_found"})
+
+    def do_POST(self) -> None:
+        if self.path != "/run":
+            self.send_json(404, {"error": "not_found"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json(400, {"error": "invalid_content_length"})
+            return
+
+        if content_length <= 0 or content_length > MAX_REQUEST_BYTES:
+            self.send_json(413, {"error": "request_too_large"})
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json(400, {"error": "invalid_json"})
+            return
+
+        code = payload.get("code")
+        stdin = payload.get("stdin", "")
+        if not isinstance(code, str) or not isinstance(stdin, str):
+            self.send_json(400, {"error": "code_and_stdin_must_be_strings"})
+            return
+
+        timeout_ms = clamp_timeout(payload.get("timeoutMs"))
+
+        try:
+            result = run_python(code, stdin, timeout_ms)
+        except Exception as error:
+            self.send_json(
+                500,
+                {
+                    "error": "runner_failure",
+                    "message": f"{type(error).__name__}: {error}",
+                },
+            )
+            return
+
+        self.send_json(200, result)
+
+
+def main() -> None:
+    server = ThreadingHTTPServer((HOST, PORT), RunnerHandler)
+    print(f"AtCrafter Runner listening on http://{HOST}:{PORT}")
+    print("WARNING: code execution is not sandboxed; run only code you trust.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        print("AtCrafter Runner stopped")
+
+
+if __name__ == "__main__":
+    main()
