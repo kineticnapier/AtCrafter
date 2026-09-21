@@ -31,7 +31,6 @@ public final class TerminalScreen extends Screen {
         int contentWidth = Math.min(this.width - margin * 2, 760);
         int contentX = (this.width - contentWidth) / 2;
         int leftWidth = Math.max(120, (contentWidth - gap) / 2);
-        int rightX = contentX + leftWidth + gap;
         int rightWidth = contentWidth - leftWidth - gap;
 
         int codeY = 55;
@@ -94,8 +93,6 @@ public final class TerminalScreen extends Screen {
     @Override
     public void tick() {
         super.tick();
-        this.codeBox.tick();
-        this.stdinBox.tick();
         this.runButton.active = !this.running && RunnerClient.getStatus() == RunnerClient.Status.ONLINE;
     }
 
