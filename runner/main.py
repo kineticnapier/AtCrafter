@@ -7,7 +7,9 @@ import sys
 import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -15,6 +17,8 @@ MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_CHARS = 1_000_000
 DEFAULT_TIMEOUT_MS = 2_000
 MAX_TIMEOUT_MS = 10_000
+ROOT_DIR = Path(__file__).resolve().parent.parent
+PROBLEMS_DIR = ROOT_DIR / "problems"
 
 
 def json_bytes(value: Any) -> bytes:
@@ -31,6 +35,82 @@ def truncate(text: str) -> tuple[str, bool]:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text, False
     return text[:MAX_OUTPUT_CHARS], True
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def read_test_cases(directory: Path, prefix: str) -> list[dict[str, str]]:
+    if not directory.is_dir():
+        return []
+
+    cases: list[dict[str, str]] = []
+    for input_path in sorted(directory.glob("*.in")):
+        output_path = input_path.with_suffix(".out")
+        if not output_path.is_file():
+            continue
+        cases.append(
+            {
+                "name": f"{prefix} {input_path.stem}",
+                "stdin": read_text(input_path),
+                "expected": read_text(output_path),
+            }
+        )
+    return cases
+
+
+def problem_dirs() -> list[Path]:
+    if not PROBLEMS_DIR.is_dir():
+        return []
+    return sorted(
+        (path for path in PROBLEMS_DIR.iterdir() if path.is_dir() and (path / "problem.json").is_file()),
+        key=lambda path: path.name,
+    )
+
+
+def load_problem(problem_id: str) -> dict[str, Any] | None:
+    if not problem_id or problem_id in {".", ".."} or "/" in problem_id or "\\" in problem_id:
+        return None
+
+    directory = PROBLEMS_DIR / problem_id
+    if not directory.is_dir() or directory.parent.resolve() != PROBLEMS_DIR.resolve():
+        return None
+
+    metadata_path = directory / "problem.json"
+    if not metadata_path.is_file():
+        return None
+
+    try:
+        metadata = json.loads(read_text(metadata_path))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    title = metadata.get("title", problem_id)
+    default_code = metadata.get("defaultCode", "")
+    if not isinstance(title, str) or not isinstance(default_code, str):
+        return None
+
+    statement_path = directory / "statement.md"
+    statement = read_text(statement_path) if statement_path.is_file() else ""
+
+    return {
+        "id": problem_id,
+        "title": title,
+        "statement": statement,
+        "defaultCode": default_code,
+        "samples": read_test_cases(directory / "samples", "Sample"),
+        "tests": read_test_cases(directory / "tests", "Test"),
+    }
+
+
+def list_problems() -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for directory in problem_dirs():
+        problem = load_problem(directory.name)
+        if problem is not None:
+            result.append({"id": problem["id"], "title": problem["title"]})
+    return result
 
 
 def run_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
@@ -94,7 +174,7 @@ def run_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.1"
+    server_version = "AtCrafterRunner/0.2"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -114,10 +194,24 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.1",
+                    "runnerVersion": "0.2",
                     "python": sys.version.split()[0],
+                    "problemCount": len(list_problems()),
                 },
             )
+            return
+
+        if self.path == "/problems":
+            self.send_json(200, {"problems": list_problems()})
+            return
+
+        if self.path.startswith("/problems/"):
+            problem_id = unquote(self.path[len("/problems/") :])
+            problem = load_problem(problem_id)
+            if problem is None:
+                self.send_json(404, {"error": "problem_not_found"})
+            else:
+                self.send_json(200, problem)
             return
 
         self.send_json(404, {"error": "not_found"})
@@ -169,6 +263,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), RunnerHandler)
     print(f"AtCrafter Runner listening on http://{HOST}:{PORT}")
+    print(f"Problems directory: {PROBLEMS_DIR}")
     print("WARNING: code execution is not sandboxed; run only code you trust.")
     try:
         server.serve_forever()
