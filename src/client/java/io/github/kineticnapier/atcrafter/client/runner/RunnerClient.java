@@ -324,7 +324,23 @@ public final class RunnerClient {
         boolean truncated
     ) {
         public boolean isSequence() {
-            return type.equals("list") || type.equals("tuple") || type.equals("set") || type.equals("frozenset");
+            return type.equals("list")
+                || type.equals("tuple")
+                || type.equals("set")
+                || type.equals("frozenset")
+                || type.equals("deque");
+        }
+
+        public boolean isSetLike() {
+            return type.equals("set") || type.equals("frozenset");
+        }
+
+        public boolean isDeque() {
+            return type.equals("deque");
+        }
+
+        public boolean isDict() {
+            return type.equals("dict");
         }
     }
 
