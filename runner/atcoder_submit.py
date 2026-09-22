@@ -11,17 +11,22 @@ from typing import Any
 
 ATCODER_BASE = "https://atcoder.jp"
 REMOTE_ID_RE = re.compile(r"atcoder:(abc\d+):([a-z0-9_-]+)\Z")
+SUBMISSION_ERROR_MARKER = "it may be a rate limit"
 
 
 class AtCoderSubmitError(RuntimeError):
     pass
 
 
-def problem_url(problem_id: str) -> str:
+def _parse_problem_id(problem_id: str) -> tuple[str, str]:
     match = REMOTE_ID_RE.fullmatch(problem_id)
     if match is None:
         raise AtCoderSubmitError("invalid AtCoder problem id")
-    contest_id, task_id = match.groups()
+    return match.groups()
+
+
+def problem_url(problem_id: str) -> str:
+    contest_id, task_id = _parse_problem_id(problem_id)
     return f"{ATCODER_BASE}/contests/{contest_id}/tasks/{task_id}"
 
 
@@ -38,6 +43,21 @@ def _oj_api_path() -> str | None:
             if candidate.is_file():
                 return str(candidate)
     return None
+
+
+def _useful_stderr(stderr: str) -> str:
+    useful: list[str] = []
+    for raw_line in stderr.splitlines():
+        line = raw_line.strip()
+        lower = line.lower()
+        if not line:
+            continue
+        if "atcoder says:" in lower or "warning:" in lower or "error:" in lower:
+            useful.append(line)
+    if not useful:
+        return ""
+    # Keep the error sent to Minecraft compact while preserving the actual AtCoder message.
+    return " / ".join(useful[-3:])
 
 
 def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str, Any]:
@@ -64,15 +84,14 @@ def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str
         raise AtCoderSubmitError(f"oj-api を起動できませんでした: {error}") from error
 
     stdout = process.stdout.strip()
+    stderr = process.stderr.strip()
     if not stdout:
-        detail = process.stderr.strip()
-        raise AtCoderSubmitError(detail or f"oj-api exited with code {process.returncode}")
+        raise AtCoderSubmitError(_useful_stderr(stderr) or stderr or f"oj-api exited with code {process.returncode}")
 
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as error:
-        detail = process.stderr.strip()
-        raise AtCoderSubmitError(detail or "oj-api が不正なJSONを返しました。") from error
+        raise AtCoderSubmitError(_useful_stderr(stderr) or stderr or "oj-api が不正なJSONを返しました。") from error
 
     if not isinstance(payload, dict):
         raise AtCoderSubmitError("oj-api が不正な応答を返しました。")
@@ -84,8 +103,11 @@ def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str
             message = " / ".join(str(item) for item in messages if item)
         else:
             message = ""
+        detail = _useful_stderr(stderr)
+        if detail and detail not in message:
+            message = f"{message} / {detail}" if message else detail
         if not message:
-            message = process.stderr.strip() or f"oj-api failed with code {process.returncode}"
+            message = stderr or f"oj-api failed with code {process.returncode}"
         raise AtCoderSubmitError(message)
 
     result = payload.get("result")
@@ -123,7 +145,7 @@ def _language_score(language: dict[str, Any]) -> tuple[int, tuple[int, int, int]
     return family_score, _version_tuple(description), numeric_id
 
 
-def _select_python_language(url: str) -> dict[str, str]:
+def _select_python_language(url: str, source_path: Path) -> dict[str, str]:
     problem = _run_oj_api(["get-problem", url, "--full"], timeout_seconds=30.0)
     available = problem.get("availableLanguages")
     if isinstance(available, list):
@@ -138,9 +160,12 @@ def _select_python_language(url: str) -> dict[str, str]:
                     "description": description or language_id,
                 }
 
-    # Older / unusual judges may omit availableLanguages. Keep the previous guesser as a fallback.
+    # Older / unusual judges may omit availableLanguages. Keep the guesser as a fallback.
     try:
-        guessed = _run_oj_api(["guess-language-id", url, "--file", "main.py"], timeout_seconds=30.0)
+        guessed = _run_oj_api(
+            ["guess-language-id", url, "--file", str(source_path)],
+            timeout_seconds=30.0,
+        )
     except AtCoderSubmitError as error:
         raise AtCoderSubmitError(
             "Python の提出言語を1つに決められませんでした。利用可能言語一覧の取得にも失敗しました: "
@@ -155,6 +180,49 @@ def _select_python_language(url: str) -> dict[str, str]:
         "id": language_id,
         "description": description or language_id,
     }
+
+
+def _latest_submission_url(problem_id: str) -> tuple[bool, str | None]:
+    """Return (lookup_succeeded, latest_matching_submission_url).
+
+    oj-api currently reports a generic SubmissionError when AtCoder does not redirect to
+    /submissions/me after POST.  That message can also occur even after a submission was
+    accepted.  Looking at the user's submission list before/after lets us distinguish a
+    real failure from a parser/redirect mismatch without blindly resubmitting code.
+    """
+    contest_id, task_id = _parse_problem_id(problem_id)
+    try:
+        import onlinejudge.utils
+
+        session = onlinejudge.utils.get_default_session()
+        with onlinejudge.utils.with_cookiejar(session):
+            response = session.get(
+                f"{ATCODER_BASE}/contests/{contest_id}/submissions/me",
+                params={"f.Task": task_id, "orderBy": "created", "desc": "true"},
+                timeout=12.0,
+                allow_redirects=True,
+            )
+            if response.status_code != 200 or "/login" in response.url:
+                return False, None
+            html = response.text
+    except Exception:
+        return False, None
+
+    submission_pattern = re.compile(
+        rf'href=["\'](/contests/{re.escape(contest_id)}/submissions/(\d+))["\']'
+    )
+    task_marker = f"/contests/{contest_id}/tasks/{task_id}"
+    found: list[tuple[int, str]] = []
+    for row in re.findall(r"<tr\b.*?</tr>", html, flags=re.IGNORECASE | re.DOTALL):
+        if task_marker not in row:
+            continue
+        match = submission_pattern.search(row)
+        if match is not None:
+            found.append((int(match.group(2)), ATCODER_BASE + match.group(1)))
+
+    if not found:
+        return True, None
+    return True, max(found, key=lambda item: item[0])[1]
 
 
 def session_status() -> dict[str, Any]:
@@ -193,29 +261,51 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
         raise AtCoderSubmitError("AtCoder にログインしていません。")
 
     url = problem_url(problem_id)
+    before_ok, before_submission = _latest_submission_url(problem_id)
+
     with tempfile.TemporaryDirectory(prefix="atcrafter-submit-") as temp_dir:
         source_path = Path(temp_dir) / "main.py"
         source_path.write_text(code, encoding="utf-8", newline="\n")
 
-        language = _select_python_language(url)
+        language = _select_python_language(url, source_path)
         language_id = language["id"]
         language_description = language["description"]
 
-        submission = _run_oj_api(
-            [
-                "submit-code",
-                url,
-                "--file",
-                str(source_path),
-                "--language",
-                language_id,
-            ],
-            timeout_seconds=45.0,
-        )
+        try:
+            submission = _run_oj_api(
+                [
+                    "submit-code",
+                    url,
+                    "--file",
+                    str(source_path),
+                    "--language",
+                    language_id,
+                ],
+                timeout_seconds=45.0,
+            )
+        except AtCoderSubmitError as error:
+            # The upstream client uses this generic message whenever AtCoder does not end
+            # on /submissions/me.  Verify the submission list before declaring failure.
+            if SUBMISSION_ERROR_MARKER in str(error):
+                after_ok, after_submission = _latest_submission_url(problem_id)
+                if before_ok and after_ok and after_submission is not None and after_submission != before_submission:
+                    return {
+                        "url": after_submission,
+                        "problemUrl": url,
+                        "languageId": language_id,
+                        "languageDescription": language_description,
+                    }
+            raise
 
     submission_url = str(submission.get("url", "")).strip()
     if not re.fullmatch(r"https://atcoder\.jp/contests/[a-z0-9_-]+/submissions/\d+", submission_url):
-        raise AtCoderSubmitError("提出は完了しましたが、提出URLを取得できませんでした。")
+        # Also recover from an upstream response-shape change if the submission list proves
+        # that a new submission exists.
+        after_ok, after_submission = _latest_submission_url(problem_id)
+        if before_ok and after_ok and after_submission is not None and after_submission != before_submission:
+            submission_url = after_submission
+        else:
+            raise AtCoderSubmitError("提出は完了した可能性がありますが、提出URLを確認できませんでした。")
 
     return {
         "url": submission_url,
