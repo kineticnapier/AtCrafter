@@ -113,73 +113,237 @@ public final class DebugWorldRenderer {
             RunnerClient.DebugValue value = entry.getValue();
             BlockPos base = variableBase(row);
 
-            if (value.isSequence() && !value.items().isEmpty()) {
-                int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
-                for (int i = 0; i < count; i++) {
-                    RunnerClient.DebugValue item = value.items().get(i);
-                    boolean changed = itemChanged(name, i, item);
-                    BlockPos position = base.relative(RIGHT, i);
-                    blocks.put(position, blockFor(item, changed));
-                    labels.put(
-                        position,
-                        name + "[" + i + "] = " + truncateLabel(item.display(), 64)
-                            + "  (" + item.type() + ")"
-                            + (changed ? "  ← changed" : "")
-                    );
-                    nameplates.put(
-                        position,
-                        twoLineNameplate(
-                            name + "[" + i + "]",
-                            truncateLabel(item.display(), 28),
-                            changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
-                        )
-                    );
-                }
+            if (value.isDict() && !value.entries().isEmpty()) {
+                renderDict(name, value, base, blocks, labels, nameplates);
                 continue;
             }
 
-            boolean changed = valueChanged(name, value);
-            blocks.put(base, blockFor(value, changed));
-            labels.put(
-                base,
-                name + " = " + truncateLabel(value.display(), 72)
-                    + "  (" + value.type() + ")"
-                    + (changed ? "  ← changed" : "")
-            );
-            nameplates.put(
-                base,
-                twoLineNameplate(
-                    name,
-                    truncateLabel(value.display(), 32),
-                    changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
-                )
-            );
+            if (value.isSequence() && !value.items().isEmpty()) {
+                renderSequence(name, value, base, blocks, labels, nameplates);
+                continue;
+            }
+
+            renderScalar(name, value, base, blocks, labels, nameplates);
         }
 
-        BlockPos stdoutPosition = DebugDimensionController.DEBUG_ORIGIN.relative(RIGHT, -2);
-        blocks.put(stdoutPosition, Blocks.GREEN_CONCRETE.defaultBlockState());
-        String stdout = stdoutAtStep(stepIndex);
-        labels.put(
-            stdoutPosition,
-            stdout.isEmpty()
-                ? "stdout = (empty)"
-                : "stdout = " + truncateLabel(stdout.replace('\n', ' '), 80)
-        );
-        nameplates.put(
-            stdoutPosition,
-            twoLineNameplate(
-                "stdout",
-                stdout.isEmpty() ? "(empty)" : truncateLabel(stdout.replace('\n', ' '), 28),
-                ChatFormatting.GREEN
-            )
-        );
+        renderStdoutBoard(blocks, labels, nameplates);
 
         hoverLabels = Map.copyOf(labels);
         DebugDimensionController.replaceDebugBlocks(blocks, nameplates);
     }
 
+    private static void renderScalar(
+        String name,
+        RunnerClient.DebugValue value,
+        BlockPos position,
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, String> labels,
+        Map<BlockPos, Component> nameplates
+    ) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        boolean changed = previous != null && !sameValue(previous, value);
+        blocks.put(position, blockFor(value, changed));
+        labels.put(
+            position,
+            name + " = " + truncateLabel(value.display(), 72)
+                + "  (" + value.type() + ")"
+                + changeSuffix(changed, previous)
+        );
+        nameplates.put(
+            position,
+            twoLineNameplate(
+                name,
+                truncateLabel(value.display(), 32),
+                changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+            )
+        );
+    }
+
+    private static void renderSequence(
+        String name,
+        RunnerClient.DebugValue value,
+        BlockPos base,
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, String> labels,
+        Map<BlockPos, Component> nameplates
+    ) {
+        int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
+        boolean actualBackVisible = count == value.items().size() && !value.truncated();
+
+        for (int i = 0; i < count; i++) {
+            RunnerClient.DebugValue item = value.items().get(i);
+            RunnerClient.DebugValue previous = previousSequenceItem(name, value, i, item);
+            boolean changed = sequenceItemChanged(name, value, i, item, previous);
+            BlockPos position = base.relative(RIGHT, i);
+            blocks.put(position, collectionItemBlock(value, item, changed));
+
+            String itemName;
+            String hoverName;
+            if (value.isSetLike()) {
+                itemName = name;
+                hoverName = name + " contains " + truncateLabel(item.display(), 48);
+            } else if (value.isDeque()) {
+                boolean front = i == 0;
+                boolean back = actualBackVisible && i == count - 1;
+                if (front && back) {
+                    itemName = name + "  FRONT / BACK";
+                } else if (front) {
+                    itemName = name + "  FRONT";
+                } else if (back) {
+                    itemName = name + "  BACK";
+                } else {
+                    itemName = name;
+                }
+                hoverName = name + "[" + i + "]";
+            } else {
+                itemName = name + "[" + i + "]";
+                hoverName = itemName;
+            }
+
+            labels.put(
+                position,
+                hoverName + " = " + truncateLabel(item.display(), 64)
+                    + "  (" + item.type() + ")"
+                    + changeSuffix(changed, previous)
+            );
+            nameplates.put(
+                position,
+                twoLineNameplate(
+                    itemName,
+                    truncateLabel(item.display(), 28),
+                    changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+                )
+            );
+        }
+    }
+
+    private static void renderDict(
+        String name,
+        RunnerClient.DebugValue value,
+        BlockPos base,
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, String> labels,
+        Map<BlockPos, Component> nameplates
+    ) {
+        int count = Math.min(MAX_SEQUENCE_ITEMS, value.entries().size());
+        RunnerClient.DebugValue previousDict = previousValue(name);
+
+        for (int i = 0; i < count; i++) {
+            RunnerClient.DebugEntry entry = value.entries().get(i);
+            RunnerClient.DebugEntry previousEntry = previousDictEntry(name, entry.key());
+            boolean dictExisted = previousDict != null && previousDict.isDict();
+            boolean keyChanged = dictExisted && previousEntry == null;
+            boolean valueChanged = dictExisted
+                && (previousEntry == null || !sameValue(previousEntry.value(), entry.value()));
+
+            BlockPos keyPosition = base.relative(RIGHT, i);
+            BlockPos valuePosition = base.relative(FORWARD, 1).relative(RIGHT, i);
+
+            blocks.put(
+                keyPosition,
+                keyChanged ? Blocks.YELLOW_CONCRETE.defaultBlockState() : Blocks.ORANGE_CONCRETE.defaultBlockState()
+            );
+            blocks.put(valuePosition, blockFor(entry.value(), valueChanged));
+
+            labels.put(
+                keyPosition,
+                name + " key = " + truncateLabel(entry.key().display(), 64)
+                    + "  (" + entry.key().type() + ")"
+                    + (keyChanged ? "  ← new key" : "")
+            );
+            labels.put(
+                valuePosition,
+                name + "[" + truncateLabel(entry.key().display(), 36) + "] = "
+                    + truncateLabel(entry.value().display(), 60)
+                    + "  (" + entry.value().type() + ")"
+                    + changeSuffix(valueChanged, previousEntry == null ? null : previousEntry.value())
+            );
+
+            nameplates.put(
+                keyPosition,
+                twoLineNameplate(
+                    name + " key",
+                    truncateLabel(entry.key().display(), 24),
+                    keyChanged ? ChatFormatting.YELLOW : ChatFormatting.GOLD
+                )
+            );
+            nameplates.put(
+                valuePosition,
+                twoLineNameplate(
+                    name + "[" + truncateLabel(entry.key().display(), 18) + "]",
+                    truncateLabel(entry.value().display(), 24),
+                    valueChanged ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+                )
+            );
+        }
+    }
+
+    private static void renderStdoutBoard(
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, String> labels,
+        Map<BlockPos, Component> nameplates
+    ) {
+        String stdout = stdoutAtStep(stepIndex);
+        String hover = stdout.isEmpty()
+            ? "stdout = (empty)"
+            : "stdout = " + truncateLabel(stdout.replace('\n', ' '), 120);
+
+        BlockPos boardBase = DebugDimensionController.DEBUG_ORIGIN.relative(RIGHT, -4);
+        for (int x = 0; x < 3; x++) {
+            for (int y = 0; y < 2; y++) {
+                BlockPos position = boardBase.relative(RIGHT, x).above(y);
+                blocks.put(position, Blocks.BLACK_CONCRETE.defaultBlockState());
+                labels.put(position, hover);
+            }
+        }
+
+        BlockPos titlePosition = boardBase.relative(RIGHT, 1).above(1);
+        nameplates.put(titlePosition, stdoutNameplate(stdout));
+    }
+
+    private static Component stdoutNameplate(String stdout) {
+        String body = stdout.isEmpty() ? "(empty)" : compactStdout(stdout);
+        return Component.literal("stdout\n")
+            .withStyle(ChatFormatting.GREEN)
+            .append(Component.literal(body).withStyle(ChatFormatting.WHITE));
+    }
+
+    private static String compactStdout(String stdout) {
+        String normalized = stdout.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        StringBuilder result = new StringBuilder();
+        int count = Math.min(3, lines.length);
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                result.append('\n');
+            }
+            result.append(truncateLabel(lines[i], 42));
+        }
+        if (lines.length > count) {
+            result.append("\n...");
+        }
+        return result.toString();
+    }
+
     private static Component twoLineNameplate(String name, String value, ChatFormatting color) {
         return Component.literal(name + "\n" + value).withStyle(color);
+    }
+
+    private static BlockState collectionItemBlock(
+        RunnerClient.DebugValue container,
+        RunnerClient.DebugValue item,
+        boolean changed
+    ) {
+        if (changed) {
+            return Blocks.YELLOW_CONCRETE.defaultBlockState();
+        }
+        if (container.isDeque()) {
+            return Blocks.PURPLE_CONCRETE.defaultBlockState();
+        }
+        if (container.isSetLike()) {
+            return Blocks.CYAN_CONCRETE.defaultBlockState();
+        }
+        return blockFor(item, false);
     }
 
     private static BlockState blockFor(RunnerClient.DebugValue value, boolean changed) {
@@ -194,6 +358,7 @@ public final class DebugWorldRenderer {
             case "int", "float" -> Blocks.LIGHT_BLUE_CONCRETE.defaultBlockState();
             case "str" -> Blocks.MAGENTA_CONCRETE.defaultBlockState();
             case "list", "tuple", "set", "frozenset" -> Blocks.CYAN_CONCRETE.defaultBlockState();
+            case "deque" -> Blocks.PURPLE_CONCRETE.defaultBlockState();
             case "dict" -> Blocks.ORANGE_CONCRETE.defaultBlockState();
             default -> Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState();
         };
@@ -203,18 +368,60 @@ public final class DebugWorldRenderer {
         return DebugDimensionController.DEBUG_ORIGIN.relative(FORWARD, row * ROW_SPACING);
     }
 
-    private static boolean valueChanged(String name, RunnerClient.DebugValue value) {
+    private static RunnerClient.DebugValue previousSequenceItem(
+        String name,
+        RunnerClient.DebugValue container,
+        int index,
+        RunnerClient.DebugValue item
+    ) {
         RunnerClient.DebugValue previous = previousValue(name);
-        return previous != null && (!previous.type().equals(value.type()) || !previous.display().equals(value.display()));
+        if (previous == null || !previous.isSequence()) {
+            return null;
+        }
+
+        if (container.isSetLike()) {
+            for (RunnerClient.DebugValue oldItem : previous.items()) {
+                if (sameValue(oldItem, item)) {
+                    return oldItem;
+                }
+            }
+            return null;
+        }
+
+        if (index >= previous.items().size()) {
+            return null;
+        }
+        return previous.items().get(index);
     }
 
-    private static boolean itemChanged(String name, int index, RunnerClient.DebugValue value) {
+    private static boolean sequenceItemChanged(
+        String name,
+        RunnerClient.DebugValue container,
+        int index,
+        RunnerClient.DebugValue item,
+        RunnerClient.DebugValue previousItem
+    ) {
         RunnerClient.DebugValue previous = previousValue(name);
-        if (previous == null || !previous.isSequence() || index >= previous.items().size()) {
-            return previous != null;
+        if (previous == null || !previous.isSequence()) {
+            return false;
         }
-        RunnerClient.DebugValue oldItem = previous.items().get(index);
-        return !oldItem.type().equals(value.type()) || !oldItem.display().equals(value.display());
+        if (container.isSetLike()) {
+            return previousItem == null;
+        }
+        return previousItem == null || !sameValue(previousItem, item);
+    }
+
+    private static RunnerClient.DebugEntry previousDictEntry(String name, RunnerClient.DebugValue key) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        if (previous == null || !previous.isDict()) {
+            return null;
+        }
+        for (RunnerClient.DebugEntry entry : previous.entries()) {
+            if (sameValue(entry.key(), key)) {
+                return entry;
+            }
+        }
+        return null;
     }
 
     private static RunnerClient.DebugValue previousValue(String name) {
@@ -222,6 +429,23 @@ public final class DebugWorldRenderer {
             return null;
         }
         return debugResult.steps().get(stepIndex - 1).typedLocals().get(name);
+    }
+
+    private static boolean sameValue(RunnerClient.DebugValue left, RunnerClient.DebugValue right) {
+        return left != null
+            && right != null
+            && left.type().equals(right.type())
+            && left.display().equals(right.display());
+    }
+
+    private static String changeSuffix(boolean changed, RunnerClient.DebugValue previous) {
+        if (!changed) {
+            return "";
+        }
+        if (previous == null) {
+            return "  ← changed  previous: (missing)";
+        }
+        return "  ← changed  previous: " + truncateLabel(previous.display(), 36);
     }
 
     private static void announceStep() {
@@ -260,7 +484,7 @@ public final class DebugWorldRenderer {
             return;
         }
 
-        String visible = truncateLabel(label, 96);
+        String visible = truncateLabel(label, 128);
         int textWidth = minecraft.font.width(visible);
         int x = (graphics.guiWidth() - textWidth) / 2;
         int y = graphics.guiHeight() / 2 + 18;
