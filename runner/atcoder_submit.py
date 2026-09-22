@@ -44,7 +44,7 @@ def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str
     executable = _oj_api_path()
     if executable is None:
         raise AtCoderSubmitError(
-            "oj-api が見つかりません。python -m pip install online-judge-api-client を実行してください。"
+            "oj-api が見つかりません。python -m pip install online-judge-api-client-ng を実行してください。"
         )
 
     try:
@@ -94,12 +94,75 @@ def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str
     return result
 
 
+def _version_tuple(description: str) -> tuple[int, int, int]:
+    match = re.search(r"(?:cpython|python)\D*(\d+)\.(\d+)(?:\.(\d+))?", description, re.IGNORECASE)
+    if match is None:
+        return 0, 0, 0
+    return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
+
+
+def _language_score(language: dict[str, Any]) -> tuple[int, tuple[int, int, int], int]:
+    description = str(language.get("description", ""))
+    lower = description.lower()
+    language_id = str(language.get("id", ""))
+    try:
+        numeric_id = int(language_id)
+    except ValueError:
+        numeric_id = 0
+
+    if "python" not in lower:
+        return -1, (0, 0, 0), numeric_id
+    if "cpython" in lower:
+        family_score = 300
+    elif "pypy" in lower:
+        family_score = 100
+    elif "cython" in lower or "micropython" in lower:
+        family_score = 50
+    else:
+        family_score = 200
+    return family_score, _version_tuple(description), numeric_id
+
+
+def _select_python_language(url: str) -> dict[str, str]:
+    problem = _run_oj_api(["get-problem", url, "--full"], timeout_seconds=30.0)
+    available = problem.get("availableLanguages")
+    if isinstance(available, list):
+        candidates = [item for item in available if isinstance(item, dict) and _language_score(item)[0] >= 0]
+        if candidates:
+            selected = max(candidates, key=_language_score)
+            language_id = str(selected.get("id", "")).strip()
+            description = str(selected.get("description", "")).strip()
+            if language_id:
+                return {
+                    "id": language_id,
+                    "description": description or language_id,
+                }
+
+    # Older / unusual judges may omit availableLanguages. Keep the previous guesser as a fallback.
+    try:
+        guessed = _run_oj_api(["guess-language-id", url, "--file", "main.py"], timeout_seconds=30.0)
+    except AtCoderSubmitError as error:
+        raise AtCoderSubmitError(
+            "Python の提出言語を1つに決められませんでした。利用可能言語一覧の取得にも失敗しました: "
+            + str(error)
+        ) from error
+
+    language_id = str(guessed.get("id", "")).strip()
+    description = str(guessed.get("description", "")).strip()
+    if not language_id:
+        raise AtCoderSubmitError("Python の提出言語IDを取得できませんでした。")
+    return {
+        "id": language_id,
+        "description": description or language_id,
+    }
+
+
 def session_status() -> dict[str, Any]:
     if _oj_api_path() is None:
         return {
             "available": False,
             "loggedIn": False,
-            "message": "oj-api が見つかりません。online-judge-api-client をインストールしてください。",
+            "message": "oj-api が見つかりません。online-judge-api-client-ng をインストールしてください。",
         }
 
     try:
@@ -127,23 +190,16 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
     if not session["available"]:
         raise AtCoderSubmitError(str(session["message"]))
     if not session["loggedIn"]:
-        raise AtCoderSubmitError(
-            "AtCoder にログインしていません。PC側で oj login https://atcoder.jp/ を実行してください。"
-        )
+        raise AtCoderSubmitError("AtCoder にログインしていません。")
 
     url = problem_url(problem_id)
     with tempfile.TemporaryDirectory(prefix="atcrafter-submit-") as temp_dir:
         source_path = Path(temp_dir) / "main.py"
         source_path.write_text(code, encoding="utf-8", newline="\n")
 
-        language = _run_oj_api(
-            ["guess-language-id", url, "--file", str(source_path)],
-            timeout_seconds=30.0,
-        )
-        language_id = str(language.get("id", "")).strip()
-        language_description = str(language.get("description", "")).strip()
-        if not language_id:
-            raise AtCoderSubmitError("Python の提出言語IDを取得できませんでした。")
+        language = _select_python_language(url)
+        language_id = language["id"]
+        language_description = language["description"]
 
         submission = _run_oj_api(
             [
@@ -165,5 +221,5 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
         "url": submission_url,
         "problemUrl": url,
         "languageId": language_id,
-        "languageDescription": language_description or language_id,
+        "languageDescription": language_description,
     }
