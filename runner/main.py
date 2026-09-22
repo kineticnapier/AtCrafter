@@ -21,6 +21,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 PROBLEMS_DIR = ROOT_DIR / "problems"
 
 DEBUG_DRIVER = r'''
+import io
 import json
 import sys
 import traceback
@@ -29,8 +30,37 @@ TARGET = sys.argv[1]
 TRACE_FILE = sys.argv[2]
 MAX_STEPS = 5000
 MAX_VALUE_CHARS = 240
+MAX_STEP_STDOUT_CHARS = 4096
+STDOUT_KEY = "$stdout"
 steps = []
 trace_truncated = False
+last_stdout_snapshot = None
+
+
+class TeeStdout:
+    def __init__(self, target):
+        self.target = target
+        self.buffer = io.StringIO()
+
+    def write(self, text):
+        self.buffer.write(text)
+        return self.target.write(text)
+
+    def flush(self):
+        self.target.flush()
+
+    def isatty(self):
+        return False
+
+    @property
+    def encoding(self):
+        return getattr(self.target, "encoding", "utf-8")
+
+    def snapshot(self):
+        text = self.buffer.getvalue()
+        if len(text) <= MAX_STEP_STDOUT_CHARS:
+            return text
+        return "...<stdout truncated>\n" + text[-MAX_STEP_STDOUT_CHARS:]
 
 
 def safe_repr(value):
@@ -52,14 +82,24 @@ def snapshot(frame):
     return result
 
 
+original_stdout = sys.stdout
+captured_stdout = TeeStdout(original_stdout)
+sys.stdout = captured_stdout
+
+
 def tracer(frame, event, arg):
-    global trace_truncated
+    global trace_truncated, last_stdout_snapshot
     if frame.f_code.co_filename == TARGET and event in ("line", "return"):
         if len(steps) < MAX_STEPS:
+            locals_snapshot = snapshot(frame)
+            stdout_snapshot = captured_stdout.snapshot()
+            if stdout_snapshot != last_stdout_snapshot:
+                locals_snapshot[STDOUT_KEY] = stdout_snapshot
+                last_stdout_snapshot = stdout_snapshot
             steps.append({
                 "line": frame.f_lineno,
                 "event": event,
-                "locals": snapshot(frame),
+                "locals": locals_snapshot,
             })
         else:
             trace_truncated = True
@@ -76,6 +116,7 @@ except BaseException:
     traceback.print_exc()
 finally:
     sys.settrace(None)
+    sys.stdout = original_stdout
     try:
         with open(TRACE_FILE, "w", encoding="utf-8") as trace_file:
             json.dump(
@@ -296,7 +337,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.3"
+    server_version = "AtCrafterRunner/0.4"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -316,7 +357,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.3",
+                    "runnerVersion": "0.4",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
