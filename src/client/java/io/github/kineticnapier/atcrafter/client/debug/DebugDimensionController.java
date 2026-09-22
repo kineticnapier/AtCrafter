@@ -21,7 +21,6 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import org.joml.Vector3f;
 
 /**
  * Moves the local singleplayer player into AtCrafter's dedicated debug dimension and owns
@@ -178,7 +177,6 @@ public final class DebugDimensionController {
         display.setLineWidth(1000);
         display.setBackgroundColor(0x50000000);
         display.setBillboardConstraints(Display.BillboardConstraints.CENTER);
-        display.setScale(new Vector3f(0.8f, 0.8f, 0.8f));
         display.setViewRange(1.0F);
         level.addFreshEntity(display);
         placedLabels.add(display);
