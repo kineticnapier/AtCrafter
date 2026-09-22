@@ -11,6 +11,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -124,17 +125,23 @@ public final class RunnerClient {
             if (stepArray != null) {
                 for (JsonElement element : stepArray) {
                     JsonObject step = element.getAsJsonObject();
-                    Map<String, String> locals = new LinkedHashMap<>();
+                    Map<String, DebugValue> locals = new LinkedHashMap<>();
                     JsonObject localsJson = step.getAsJsonObject("locals");
                     if (localsJson != null) {
                         for (Map.Entry<String, JsonElement> entry : localsJson.entrySet()) {
-                            locals.put(entry.getKey(), entry.getValue().getAsString());
+                            if (entry.getValue().isJsonObject()) {
+                                locals.put(entry.getKey(), parseDebugValue(entry.getValue().getAsJsonObject()));
+                            }
                         }
                     }
+                    String stdout = step.has("stdout") && !step.get("stdout").isJsonNull()
+                        ? step.get("stdout").getAsString()
+                        : null;
                     steps.add(new DebugStep(
                         step.get("line").getAsInt(),
                         step.get("event").getAsString(),
-                        Map.copyOf(locals)
+                        Collections.unmodifiableMap(new LinkedHashMap<>(locals)),
+                        stdout
                     ));
                 }
             }
@@ -144,6 +151,65 @@ public final class RunnerClient {
                 json.has("traceTruncated") && json.get("traceTruncated").getAsBoolean()
             );
         });
+    }
+
+    private static DebugValue parseDebugValue(JsonObject json) {
+        String type = stringOr(json, "type", "object");
+        String display = stringOr(json, "display", "?");
+
+        List<DebugValue> items = new ArrayList<>();
+        JsonArray itemArray = json.getAsJsonArray("items");
+        if (itemArray != null) {
+            for (JsonElement element : itemArray) {
+                if (element.isJsonObject()) {
+                    items.add(parseDebugValue(element.getAsJsonObject()));
+                }
+            }
+        }
+
+        List<DebugEntry> entries = new ArrayList<>();
+        JsonArray entryArray = json.getAsJsonArray("entries");
+        if (entryArray != null) {
+            for (JsonElement element : entryArray) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject entry = element.getAsJsonObject();
+                JsonObject key = entry.getAsJsonObject("key");
+                JsonObject value = entry.getAsJsonObject("value");
+                if (key != null && value != null) {
+                    entries.add(new DebugEntry(parseDebugValue(key), parseDebugValue(value)));
+                }
+            }
+        }
+
+        Boolean boolValue = json.has("boolValue") && !json.get("boolValue").isJsonNull()
+            ? json.get("boolValue").getAsBoolean()
+            : null;
+        String numberText = nullableString(json, "numberText");
+        String text = nullableString(json, "text");
+        String className = nullableString(json, "className");
+        boolean truncated = json.has("truncated") && json.get("truncated").getAsBoolean();
+
+        return new DebugValue(
+            type,
+            display,
+            List.copyOf(items),
+            List.copyOf(entries),
+            boolValue,
+            numberText,
+            text,
+            className,
+            truncated
+        );
+    }
+
+    private static String stringOr(JsonObject json, String name, String fallback) {
+        return json.has(name) && !json.get(name).isJsonNull() ? json.get(name).getAsString() : fallback;
+    }
+
+    private static String nullableString(JsonObject json, String name) {
+        return json.has(name) && !json.get(name).isJsonNull() ? json.get(name).getAsString() : null;
     }
 
     private static CompletableFuture<HttpResponse<String>> postExecution(URI uri, String code, String stdin) {
@@ -237,7 +303,26 @@ public final class RunnerClient {
     ) {
     }
 
-    public record DebugStep(int line, String event, Map<String, String> locals) {
+    public record DebugValue(
+        String type,
+        String display,
+        List<DebugValue> items,
+        List<DebugEntry> entries,
+        Boolean boolValue,
+        String numberText,
+        String text,
+        String className,
+        boolean truncated
+    ) {
+        public boolean isSequence() {
+            return type.equals("list") || type.equals("tuple") || type.equals("set") || type.equals("frozenset");
+        }
+    }
+
+    public record DebugEntry(DebugValue key, DebugValue value) {
+    }
+
+    public record DebugStep(int line, String event, Map<String, DebugValue> locals, String stdout) {
     }
 
     public record DebugResult(RunResult run, List<DebugStep> steps, boolean traceTruncated) {
