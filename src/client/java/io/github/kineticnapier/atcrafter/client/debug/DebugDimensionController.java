@@ -104,6 +104,12 @@ public final class DebugDimensionController {
                 );
             }
 
+            // Clear persisted labels/blocks before the player arrives. Previously this cleanup
+            // only happened when the first new visualization was built, so stale nameplates
+            // could be visible briefly after entering the debug dimension.
+            clearWorkspace(debugLevel);
+            workspaceInitialized = true;
+
             player.teleportTo(
                 debugLevel,
                 DEBUG_X,
