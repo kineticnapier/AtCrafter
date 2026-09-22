@@ -1,3 +1,7 @@
 {
-  "block.atcrafter.terminal": "AtCrafter Terminal"
+  "block.atcrafter.terminal": "AtCrafter Terminal",
+  "key.categories.atcrafter": "AtCrafter",
+  "key.atcrafter.debug_previous": "デバッグ: 前のステップ",
+  "key.atcrafter.debug_next": "デバッグ: 次のステップ",
+  "key.atcrafter.debug_exit": "デバッグ世界を終了"
 }
