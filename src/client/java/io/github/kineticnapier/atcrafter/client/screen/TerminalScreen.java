@@ -1,6 +1,7 @@
 package io.github.kineticnapier.atcrafter.client.screen;
 
 import io.github.kineticnapier.atcrafter.client.debug.DebugWorldRenderer;
+import io.github.kineticnapier.atcrafter.client.runner.AtCoderSubmissionClient;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import io.github.kineticnapier.atcrafter.client.storage.CodeDraftStore;
 import java.util.ArrayList;
@@ -18,6 +19,7 @@ public final class TerminalScreen extends Screen {
     private static final Component TITLE = Component.literal("AtCrafter");
     private static final String DEBUG_STDOUT_KEY = "$stdout";
     private static final String[] ATCODER_TASKS = {"A", "B", "C", "D", "E", "F", "G"};
+    private static final long SUBMIT_CONFIRM_MILLIS = 10_000L;
 
     private Tab currentTab = Tab.CODE;
     private ProblemSource problemSource = ProblemSource.LOCAL;
@@ -58,6 +60,8 @@ public final class TerminalScreen extends Screen {
     private String problemError = "";
     private String resultText = "まだ判定していません。";
     private int resultColor = 0xA0A0A0;
+    private String submitConfirmProblemId;
+    private long submitConfirmDeadline;
 
     private int problemScroll;
     private int problemContentHeight;
@@ -175,7 +179,7 @@ public final class TerminalScreen extends Screen {
                 .build()
         );
         this.submitButton = addRenderableWidget(
-            Button.builder(Component.literal("提出"), button -> runJudge(currentTests(), "提出"))
+            Button.builder(Component.literal("提出"), button -> submitCurrentProblem())
                 .bounds(slots[1], bottomY, slotWidth, 20)
                 .build()
         );
@@ -404,6 +408,7 @@ public final class TerminalScreen extends Screen {
     }
 
     private void applyLoadedProblem(RunnerClient.ProblemData problem, int localIndex) {
+        resetSubmitConfirmation();
         this.problemIndex = localIndex;
         this.currentProblem = problem;
         this.problemError = "";
@@ -469,6 +474,7 @@ public final class TerminalScreen extends Screen {
             return;
         }
         saveDrafts();
+        resetSubmitConfirmation();
         this.problemSource = source;
         this.problemScroll = 0;
         this.problemError = "";
@@ -558,6 +564,9 @@ public final class TerminalScreen extends Screen {
     @Override
     public void tick() {
         super.tick();
+        if (this.submitConfirmProblemId != null && System.currentTimeMillis() > this.submitConfirmDeadline) {
+            resetSubmitConfirmation();
+        }
         updateActionButtons();
     }
 
@@ -565,6 +574,7 @@ public final class TerminalScreen extends Screen {
         boolean online = RunnerClient.getStatus() == RunnerClient.Status.ONLINE;
         boolean loaded = this.currentProblem != null && !this.loadingProblems;
         boolean available = !this.running && online && loaded;
+        boolean remoteAtCoder = loaded && this.currentProblem.id().startsWith("atcoder:");
 
         if (this.runButton == null) {
             return;
@@ -572,7 +582,12 @@ public final class TerminalScreen extends Screen {
 
         this.runButton.active = available;
         this.sampleButton.active = available && !currentSamples().isEmpty();
-        this.submitButton.active = available && !currentTests().isEmpty();
+        this.submitButton.active = available && (remoteAtCoder || !currentTests().isEmpty());
+        this.submitButton.setMessage(Component.literal(
+            remoteAtCoder
+                ? (isSubmitConfirmationActive() ? "確認: 提出" : "AtCoder提出")
+                : "提出"
+        ));
         this.debugCaseButton.active = available && selectedFailure() != null;
 
         this.localSourceButton.active = !this.loadingProblems
@@ -610,6 +625,18 @@ public final class TerminalScreen extends Screen {
         this.debugWorldButton.active = !this.running && stepCount > 0 && this.debugStepIndex >= 0;
     }
 
+    private boolean isSubmitConfirmationActive() {
+        return this.currentProblem != null
+            && this.submitConfirmProblemId != null
+            && this.submitConfirmProblemId.equals(this.currentProblem.id())
+            && System.currentTimeMillis() <= this.submitConfirmDeadline;
+    }
+
+    private void resetSubmitConfirmation() {
+        this.submitConfirmProblemId = null;
+        this.submitConfirmDeadline = 0L;
+    }
+
     private void setRunning(boolean value) {
         this.running = value;
         updateActionButtons();
@@ -643,6 +670,56 @@ public final class TerminalScreen extends Screen {
                     applyTabVisibility();
                 });
             });
+    }
+
+    private void submitCurrentProblem() {
+        if (this.currentProblem == null || this.running || RunnerClient.getStatus() != RunnerClient.Status.ONLINE) {
+            return;
+        }
+
+        if (!this.currentProblem.id().startsWith("atcoder:")) {
+            runJudge(currentTests(), "提出");
+            return;
+        }
+
+        if (!isSubmitConfirmationActive()) {
+            this.submitConfirmProblemId = this.currentProblem.id();
+            this.submitConfirmDeadline = System.currentTimeMillis() + SUBMIT_CONFIRM_MILLIS;
+            this.judgeResults.clear();
+            this.selectedJudgeIndex = -1;
+            this.resultText = "本当に AtCoder へ提出しますか？\n10秒以内にもう一度「AtCoder提出」を押してください。";
+            this.resultColor = 0xFFFF55;
+            updateActionButtons();
+            return;
+        }
+
+        saveDrafts();
+        resetSubmitConfirmation();
+        setRunning(true);
+        this.judgeResults.clear();
+        this.selectedJudgeIndex = -1;
+        this.resultText = "AtCoder へ提出中...";
+        this.resultColor = 0xE0E0E0;
+
+        String problemId = this.currentProblem.id();
+        String code = this.codeBox.getValue();
+        AtCoderSubmissionClient.submit(problemId, code).whenComplete((submission, error) -> {
+            if (this.minecraft == null) {
+                return;
+            }
+            this.minecraft.execute(() -> {
+                setRunning(false);
+                if (error != null) {
+                    this.resultText = "AtCoder 提出エラー:\n" + rootMessage(error);
+                    this.resultColor = 0xFF5555;
+                    return;
+                }
+                this.resultText = "AtCoder に提出しました。\n"
+                    + "言語: " + submission.languageDescription() + "\n"
+                    + submission.url();
+                this.resultColor = 0x55FF55;
+            });
+        });
     }
 
     private void runJudge(List<RunnerClient.TestCase> tests, String mode) {
