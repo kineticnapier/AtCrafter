@@ -4,6 +4,7 @@ import io.github.kineticnapier.atcrafter.AtCrafter;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,10 +47,13 @@ public final class DebugDimensionController {
     private static final double DEBUG_Z = 4.5;
     private static final float DEBUG_YAW = 180.0f;
     private static final float DEBUG_PITCH = 0.0f;
+    private static final int MINECART_ANIMATION_TICKS = 12;
 
     private static final Set<BlockPos> placedBlocks = new HashSet<>();
     private static final List<Display.TextDisplay> placedLabels = new ArrayList<>();
     private static final List<Minecart> placedMinecarts = new ArrayList<>();
+    private static final List<MinecartAnimation> minecartAnimations = new ArrayList<>();
+    private static volatile boolean animationsActive;
     private static boolean workspaceInitialized;
 
     private static volatile ReturnPoint returnPoint;
@@ -122,6 +126,8 @@ public final class DebugDimensionController {
     }
 
     public static void tick(Minecraft minecraft) {
+        tickMinecartAnimations(minecraft);
+
         if (!waitingForDebugDimension || pendingResult == null || minecraft.player == null || minecraft.level == null) {
             return;
         }
@@ -142,7 +148,7 @@ public final class DebugDimensionController {
     static void replaceDebugObjects(
         Map<BlockPos, BlockState> blocks,
         Map<BlockPos, Component> labels,
-        Map<BlockPos, Component> minecarts
+        Map<BlockPos, MinecartSpec> minecarts
     ) {
         Minecraft minecraft = Minecraft.getInstance();
         IntegratedServer server = minecraft.getSingleplayerServer();
@@ -152,7 +158,7 @@ public final class DebugDimensionController {
 
         Map<BlockPos, BlockState> requestedBlocks = Map.copyOf(blocks);
         Map<BlockPos, Component> requestedLabels = Map.copyOf(labels);
-        Map<BlockPos, Component> requestedMinecarts = Map.copyOf(minecarts);
+        Map<BlockPos, MinecartSpec> requestedMinecarts = Map.copyOf(minecarts);
         server.execute(() -> {
             ServerLevel debugLevel = server.getLevel(DEBUG_LEVEL);
             if (debugLevel == null) {
@@ -176,7 +182,7 @@ public final class DebugDimensionController {
                 spawnNameplate(debugLevel, entry.getKey(), entry.getValue());
             }
 
-            for (Map.Entry<BlockPos, Component> entry : requestedMinecarts.entrySet()) {
+            for (Map.Entry<BlockPos, MinecartSpec> entry : requestedMinecarts.entrySet()) {
                 spawnMinecart(debugLevel, entry.getKey(), entry.getValue());
             }
         });
@@ -198,20 +204,82 @@ public final class DebugDimensionController {
         placedLabels.add(display);
     }
 
-    private static void spawnMinecart(ServerLevel level, BlockPos railPosition, Component detail) {
-        Minecart minecart = new Minecart(
-            level,
-            railPosition.getX() + 0.5,
-            railPosition.getY() + 0.0625,
-            railPosition.getZ() + 0.5
-        );
+    private static void spawnMinecart(ServerLevel level, BlockPos railPosition, MinecartSpec spec) {
+        Vec3 start = minecartPosition(railPosition);
+        Minecart minecart = new Minecart(level, start.x, start.y, start.z);
         minecart.setDeltaMovement(Vec3.ZERO);
-        minecart.setCustomName(detail);
-        minecart.setCustomNameVisible(false);
+        minecart.setCustomName(spec.detail());
+        minecart.setCustomNameVisible(spec.animate());
         minecart.setInvulnerable(true);
         minecart.setSilent(true);
         level.addFreshEntity(minecart);
         placedMinecarts.add(minecart);
+
+        if (spec.animate()) {
+            minecartAnimations.add(new MinecartAnimation(
+                minecart,
+                start,
+                minecartPosition(spec.target()),
+                MINECART_ANIMATION_TICKS,
+                spec.discardAtEnd()
+            ));
+            animationsActive = true;
+        }
+    }
+
+    private static Vec3 minecartPosition(BlockPos railPosition) {
+        return new Vec3(
+            railPosition.getX() + 0.5,
+            railPosition.getY() + 0.0625,
+            railPosition.getZ() + 0.5
+        );
+    }
+
+    private static void tickMinecartAnimations(Minecraft minecraft) {
+        if (!animationsActive) {
+            return;
+        }
+
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null) {
+            animationsActive = false;
+            return;
+        }
+
+        server.execute(() -> {
+            if (minecartAnimations.isEmpty()) {
+                animationsActive = false;
+                return;
+            }
+
+            Iterator<MinecartAnimation> iterator = minecartAnimations.iterator();
+            while (iterator.hasNext()) {
+                MinecartAnimation animation = iterator.next();
+                if (animation.minecart.isRemoved()) {
+                    iterator.remove();
+                    continue;
+                }
+
+                animation.elapsed++;
+                double raw = Math.min(1.0, animation.elapsed / (double) animation.duration);
+                double t = raw * raw * (3.0 - 2.0 * raw);
+                Vec3 position = animation.start.lerp(animation.end, t);
+                animation.minecart.setDeltaMovement(Vec3.ZERO);
+                animation.minecart.setPos(position.x, position.y, position.z);
+
+                if (animation.elapsed >= animation.duration) {
+                    animation.minecart.setDeltaMovement(Vec3.ZERO);
+                    if (animation.discardAtEnd) {
+                        animation.minecart.discard();
+                    } else {
+                        animation.minecart.setCustomNameVisible(false);
+                    }
+                    iterator.remove();
+                }
+            }
+
+            animationsActive = !minecartAnimations.isEmpty();
+        });
     }
 
     public static void exit() {
@@ -279,6 +347,9 @@ public final class DebugDimensionController {
     }
 
     private static void clearPlacedObjects(ServerLevel level) {
+        minecartAnimations.clear();
+        animationsActive = false;
+
         for (BlockPos position : placedBlocks) {
             level.setBlockAndUpdate(position, Blocks.AIR.defaultBlockState());
         }
@@ -311,6 +382,39 @@ public final class DebugDimensionController {
             for (int z = WORKSPACE_MIN_Z; z <= WORKSPACE_MAX_Z; z++) {
                 level.setBlockAndUpdate(new BlockPos(x, DEBUG_ORIGIN.getY(), z), Blocks.AIR.defaultBlockState());
             }
+        }
+    }
+
+    static record MinecartSpec(Component detail, BlockPos target, boolean animate, boolean discardAtEnd) {
+        static MinecartSpec stable(Component detail, BlockPos position) {
+            return new MinecartSpec(detail, position, false, false);
+        }
+
+        static MinecartSpec moving(Component detail, BlockPos target, boolean discardAtEnd) {
+            return new MinecartSpec(detail, target, true, discardAtEnd);
+        }
+    }
+
+    private static final class MinecartAnimation {
+        private final Minecart minecart;
+        private final Vec3 start;
+        private final Vec3 end;
+        private final int duration;
+        private final boolean discardAtEnd;
+        private int elapsed;
+
+        private MinecartAnimation(
+            Minecart minecart,
+            Vec3 start,
+            Vec3 end,
+            int duration,
+            boolean discardAtEnd
+        ) {
+            this.minecart = minecart;
+            this.start = start;
+            this.end = end;
+            this.duration = duration;
+            this.discardAtEnd = discardAtEnd;
         }
     }
 
