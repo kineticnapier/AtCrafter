@@ -2,6 +2,7 @@ package io.github.kineticnapier.atcrafter.client.screen;
 
 import io.github.kineticnapier.atcrafter.client.debug.DebugWorldRenderer;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
+import io.github.kineticnapier.atcrafter.client.storage.CodeDraftStore;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -309,7 +310,14 @@ public final class TerminalScreen extends Screen {
                 this.selectedJudgeIndex = -1;
                 clearDebug();
 
-                String code = this.codeDrafts.getOrDefault(problem.id(), problem.defaultCode());
+                String code = this.codeDrafts.get(problem.id());
+                if (code == null) {
+                    code = CodeDraftStore.get(problem.id());
+                }
+                if (code == null) {
+                    code = problem.defaultCode();
+                }
+                this.codeDrafts.put(problem.id(), code);
                 this.codeBox.setValue(code);
 
                 String stdin = this.stdinDrafts.get(problem.id());
@@ -339,8 +347,16 @@ public final class TerminalScreen extends Screen {
         if (this.currentProblem == null || this.codeBox == null || this.stdinBox == null) {
             return;
         }
-        this.codeDrafts.put(this.currentProblem.id(), this.codeBox.getValue());
+        String code = this.codeBox.getValue();
+        this.codeDrafts.put(this.currentProblem.id(), code);
+        CodeDraftStore.put(this.currentProblem.id(), code);
         this.stdinDrafts.put(this.currentProblem.id(), this.stdinBox.getValue());
+    }
+
+    @Override
+    public void removed() {
+        saveDrafts();
+        super.removed();
     }
 
     private List<RunnerClient.TestCase> currentSamples() {
