@@ -37,7 +37,7 @@ public final class DebugDimensionController {
 
     private static final double DEBUG_X = 0.5;
     private static final double DEBUG_Y = -62.0;
-    private static final double DEBUG_Z = 6.5;
+    private static final double DEBUG_Z = 4.5;
     private static final float DEBUG_YAW = 180.0f;
     private static final float DEBUG_PITCH = 0.0f;
 
