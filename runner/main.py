@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from atcoder import AtCoderError, is_remote_problem_id, list_default_problems, load_remote_problem
+from atcoder_submit import AtCoderSubmitError, session_status, submit_code
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -524,7 +525,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.9"
+    server_version = "AtCrafterRunner/0.10"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -544,11 +545,15 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.9",
+                    "runnerVersion": "0.10",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
             )
+            return
+
+        if self.path == "/atcoder/session":
+            self.send_json(200, session_status())
             return
 
         if self.path == "/problems":
@@ -567,7 +572,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
-        if self.path not in {"/run", "/debug"}:
+        if self.path not in {"/run", "/debug", "/atcoder/submit"}:
             self.send_json(404, {"error": "not_found"})
             return
 
@@ -585,6 +590,39 @@ class RunnerHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             self.send_json(400, {"error": "invalid_json"})
+            return
+
+        if not isinstance(payload, dict):
+            self.send_json(400, {"error": "invalid_json_object"})
+            return
+
+        if self.path == "/atcoder/submit":
+            problem_id = payload.get("problemId")
+            code = payload.get("code")
+            if not isinstance(problem_id, str) or not isinstance(code, str):
+                self.send_json(400, {"error": "problem_id_and_code_must_be_strings"})
+                return
+            try:
+                result = submit_code(problem_id, code)
+            except AtCoderSubmitError as error:
+                self.send_json(
+                    400,
+                    {
+                        "error": "atcoder_submit_failed",
+                        "message": str(error),
+                    },
+                )
+                return
+            except Exception as error:
+                self.send_json(
+                    500,
+                    {
+                        "error": "atcoder_submit_failure",
+                        "message": f"{type(error).__name__}: {error}",
+                    },
+                )
+                return
+            self.send_json(200, result)
             return
 
         code = payload.get("code")
@@ -618,7 +656,7 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), RunnerHandler)
     print(f"AtCrafter Runner listening on http://{HOST}:{PORT}")
     print(f"Problems directory: {PROBLEMS_DIR}")
-    print("AtCoder read-only source: latest ABC tasks are appended to the problem list.")
+    print("AtCoder source: problem browsing plus oj-api backed submission are available.")
     print("WARNING: code execution is not sandboxed; run only code you trust.")
     try:
         server.serve_forever()
