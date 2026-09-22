@@ -21,6 +21,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 
 /**
  * Moves the local singleplayer player into AtCrafter's dedicated debug dimension and owns
@@ -252,10 +253,19 @@ public final class DebugDimensionController {
         }
         placedBlocks.clear();
 
-        for (Display.TextDisplay label : placedLabels) {
-            if (!label.isRemoved()) {
-                label.discard();
-            }
+        // The in-memory list is lost when the client restarts, but TextDisplay entities are
+        // persisted in the debug dimension. Sweep the whole AtCrafter workspace as well so
+        // labels from a previous run/old renderer cannot survive forever.
+        AABB labelArea = new AABB(
+            WORKSPACE_MIN_X,
+            DEBUG_ORIGIN.getY(),
+            WORKSPACE_MIN_Z,
+            WORKSPACE_MAX_X + 1,
+            DEBUG_ORIGIN.getY() + 6,
+            WORKSPACE_MAX_Z + 1
+        );
+        for (Display.TextDisplay label : level.getEntitiesOfClass(Display.TextDisplay.class, labelArea)) {
+            label.discard();
         }
         placedLabels.clear();
     }
