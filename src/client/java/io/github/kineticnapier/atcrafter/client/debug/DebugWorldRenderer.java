@@ -19,9 +19,9 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 public final class DebugWorldRenderer {
-    private static final String STDOUT_KEY = "$stdout";
-    private static final int MAX_VARIABLES = 20;
-    private static final int COLUMNS = 4;
+    private static final int MAX_VARIABLES = 12;
+    private static final int MAX_SEQUENCE_ITEMS = 12;
+    private static final int ROW_SPACING = 3;
 
     private static RunnerClient.DebugResult debugResult;
     private static int stepIndex = -1;
@@ -75,7 +75,6 @@ public final class DebugWorldRenderer {
         if (debugResult == null || debugResult.steps().isEmpty()) {
             return;
         }
-
         stepIndex = Math.max(0, Math.min(requestedStep, debugResult.steps().size() - 1));
         announceStep();
     }
@@ -123,27 +122,21 @@ public final class DebugWorldRenderer {
         }
 
         RunnerClient.DebugStep step = debugResult.steps().get(stepIndex);
-        Vec3 camera = context.camera().getPosition();
-        List<Map.Entry<String, String>> variables = step.locals().entrySet().stream()
-            .filter(entry -> !entry.getKey().equals(STDOUT_KEY))
+        List<Map.Entry<String, RunnerClient.DebugValue>> variables = step.typedLocals().entrySet().stream()
             .limit(MAX_VARIABLES)
             .toList();
-        int totalVariables = countVisibleLocals(step);
+        Vec3 camera = context.camera().getPosition();
         BlockPos stdoutPosition = origin.relative(right, -2);
 
         poseStack.pushPose();
         poseStack.translate(-camera.x, -camera.y, -camera.z);
 
-        // Draw every line primitive in one uninterrupted batch. Text rendering may switch/end
-        // BufferSource builders, so keeping a VertexConsumer alive across drawInBatch() calls
-        // can leave it pointing at a BufferBuilder that is no longer building.
         RenderType lineType = RenderType.lines();
         VertexConsumer lineConsumer = consumers.getBuffer(lineType);
 
         for (int i = 0; i < variables.size(); i++) {
-            BlockPos position = variablePosition(i);
-            AABB box = new AABB(position).inflate(0.002);
-            LevelRenderer.renderLineBox(poseStack, lineConsumer, box, 0.2f, 0.85f, 1.0f, 0.9f);
+            Map.Entry<String, RunnerClient.DebugValue> entry = variables.get(i);
+            drawValueBoxes(poseStack, lineConsumer, entry.getKey(), entry.getValue(), i);
         }
 
         LevelRenderer.renderLineBox(
@@ -160,7 +153,6 @@ public final class DebugWorldRenderer {
             bufferSource.endBatch(lineType);
         }
 
-        // Render labels only after the line batch is complete.
         renderWorldLabel(
             poseStack,
             consumers,
@@ -173,23 +165,13 @@ public final class DebugWorldRenderer {
         );
 
         for (int i = 0; i < variables.size(); i++) {
-            Map.Entry<String, String> entry = variables.get(i);
-            BlockPos position = variablePosition(i);
-            renderWorldLabel(
-                poseStack,
-                consumers,
-                minecraft,
-                position.getX() + 0.5,
-                position.getY() + 1.25,
-                position.getZ() + 0.5,
-                truncateLabel(entry.getKey() + " = " + entry.getValue(), 72),
-                0xFFFFFFFF
-            );
+            Map.Entry<String, RunnerClient.DebugValue> entry = variables.get(i);
+            drawValueLabels(poseStack, consumers, minecraft, entry.getKey(), entry.getValue(), i);
         }
 
-        int hidden = totalVariables - variables.size();
+        int hidden = step.typedLocals().size() - variables.size();
         if (hidden > 0) {
-            BlockPos position = variablePosition(variables.size());
+            BlockPos position = variableBase(variables.size());
             renderWorldLabel(
                 poseStack,
                 consumers,
@@ -217,22 +199,141 @@ public final class DebugWorldRenderer {
         poseStack.popPose();
     }
 
-    private static BlockPos variablePosition(int index) {
-        int column = index % COLUMNS;
-        int row = index / COLUMNS;
-        return origin
-            .relative(right, column * 2)
-            .relative(forward, row * 2);
+    private static void drawValueBoxes(
+        PoseStack poseStack,
+        VertexConsumer consumer,
+        String name,
+        RunnerClient.DebugValue value,
+        int row
+    ) {
+        BlockPos base = variableBase(row);
+        if (value.isSequence() && !value.items().isEmpty()) {
+            int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
+            for (int i = 0; i < count; i++) {
+                RunnerClient.DebugValue item = value.items().get(i);
+                BlockPos position = base.relative(right, i);
+                float[] color = valueColor(item, itemChanged(name, i, item));
+                LevelRenderer.renderLineBox(
+                    poseStack,
+                    consumer,
+                    new AABB(position).inflate(0.002),
+                    color[0], color[1], color[2], 0.95f
+                );
+            }
+            return;
+        }
+
+        float[] color = valueColor(value, valueChanged(name, value));
+        LevelRenderer.renderLineBox(
+            poseStack,
+            consumer,
+            new AABB(base).inflate(0.002),
+            color[0], color[1], color[2], 0.95f
+        );
     }
 
-    private static int countVisibleLocals(RunnerClient.DebugStep step) {
-        int count = 0;
-        for (String name : step.locals().keySet()) {
-            if (!name.equals(STDOUT_KEY)) {
-                count++;
+    private static void drawValueLabels(
+        PoseStack poseStack,
+        MultiBufferSource consumers,
+        Minecraft minecraft,
+        String name,
+        RunnerClient.DebugValue value,
+        int row
+    ) {
+        BlockPos base = variableBase(row);
+        if (value.isSequence() && !value.items().isEmpty()) {
+            renderWorldLabel(
+                poseStack,
+                consumers,
+                minecraft,
+                base.getX() + 0.5,
+                base.getY() + 1.55,
+                base.getZ() + 0.5,
+                name + " : " + value.type() + "[" + value.items().size() + (value.truncated() ? "+" : "") + "]",
+                0xFFFFFFFF
+            );
+            int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
+            for (int i = 0; i < count; i++) {
+                RunnerClient.DebugValue item = value.items().get(i);
+                BlockPos position = base.relative(right, i);
+                renderWorldLabel(
+                    poseStack,
+                    consumers,
+                    minecraft,
+                    position.getX() + 0.5,
+                    position.getY() + 1.2,
+                    position.getZ() + 0.5,
+                    "[" + i + "] " + truncateLabel(item.display(), 28),
+                    itemChanged(name, i, item) ? 0xFFFFFF55 : 0xFFFFFFFF
+                );
             }
+            if (value.items().size() > MAX_SEQUENCE_ITEMS || value.truncated()) {
+                BlockPos more = base.relative(right, count);
+                renderWorldLabel(
+                    poseStack,
+                    consumers,
+                    minecraft,
+                    more.getX() + 0.5,
+                    more.getY() + 1.0,
+                    more.getZ() + 0.5,
+                    "...",
+                    0xFFAAAAAA
+                );
+            }
+            return;
         }
-        return count;
+
+        renderWorldLabel(
+            poseStack,
+            consumers,
+            minecraft,
+            base.getX() + 0.5,
+            base.getY() + 1.25,
+            base.getZ() + 0.5,
+            truncateLabel(name + " = " + value.display(), 72),
+            valueChanged(name, value) ? 0xFFFFFF55 : 0xFFFFFFFF
+        );
+    }
+
+    private static BlockPos variableBase(int row) {
+        return origin.relative(forward, row * ROW_SPACING);
+    }
+
+    private static boolean valueChanged(String name, RunnerClient.DebugValue value) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        return previous != null && (!previous.type().equals(value.type()) || !previous.display().equals(value.display()));
+    }
+
+    private static boolean itemChanged(String name, int index, RunnerClient.DebugValue value) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        if (previous == null || !previous.isSequence() || index >= previous.items().size()) {
+            return previous != null;
+        }
+        RunnerClient.DebugValue oldItem = previous.items().get(index);
+        return !oldItem.type().equals(value.type()) || !oldItem.display().equals(value.display());
+    }
+
+    private static RunnerClient.DebugValue previousValue(String name) {
+        if (debugResult == null || stepIndex <= 0) {
+            return null;
+        }
+        return debugResult.steps().get(stepIndex - 1).typedLocals().get(name);
+    }
+
+    private static float[] valueColor(RunnerClient.DebugValue value, boolean changed) {
+        if (changed) {
+            return new float[] {1.0f, 0.85f, 0.15f};
+        }
+        return switch (value.type()) {
+            case "bool" -> Boolean.TRUE.equals(value.boolValue())
+                ? new float[] {0.2f, 1.0f, 0.3f}
+                : new float[] {1.0f, 0.25f, 0.25f};
+            case "int", "float" -> new float[] {0.25f, 0.85f, 1.0f};
+            case "str" -> new float[] {0.9f, 0.4f, 1.0f};
+            case "list", "tuple", "set", "frozenset" -> new float[] {0.25f, 0.7f, 1.0f};
+            case "dict" -> new float[] {1.0f, 0.55f, 0.2f};
+            default -> new float[] {0.75f, 0.75f, 0.75f};
+        };
     }
 
     private static String stdoutAtStep(int index) {
@@ -240,7 +341,7 @@ public final class DebugWorldRenderer {
             return "";
         }
         for (int i = Math.min(index, debugResult.steps().size() - 1); i >= 0; i--) {
-            String value = debugResult.steps().get(i).locals().get(STDOUT_KEY);
+            String value = debugResult.steps().get(i).stdout();
             if (value != null) {
                 return value;
             }
