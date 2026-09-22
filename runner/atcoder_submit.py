@@ -11,7 +11,6 @@ from typing import Any
 
 ATCODER_BASE = "https://atcoder.jp"
 REMOTE_ID_RE = re.compile(r"atcoder:(abc\d+):([a-z0-9_-]+)\Z")
-SUBMISSION_ERROR_MARKER = "it may be a rate limit"
 
 
 class AtCoderSubmitError(RuntimeError):
@@ -56,7 +55,6 @@ def _useful_stderr(stderr: str) -> str:
             useful.append(line)
     if not useful:
         return ""
-    # Keep the error sent to Minecraft compact while preserving the actual AtCoder message.
     return " / ".join(useful[-3:])
 
 
@@ -160,7 +158,6 @@ def _select_python_language(url: str, source_path: Path) -> dict[str, str]:
                     "description": description or language_id,
                 }
 
-    # Older / unusual judges may omit availableLanguages. Keep the guesser as a fallback.
     try:
         guessed = _run_oj_api(
             ["guess-language-id", url, "--file", str(source_path)],
@@ -182,14 +179,24 @@ def _select_python_language(url: str, source_path: Path) -> dict[str, str]:
     }
 
 
-def _latest_submission_url(problem_id: str) -> tuple[bool, str | None]:
-    """Return (lookup_succeeded, latest_matching_submission_url).
+def _submission_url_from_html(contest_id: str, task_id: str, html: str) -> str | None:
+    submission_pattern = re.compile(
+        rf'href=["\'](/contests/{re.escape(contest_id)}/submissions/(\d+))["\']'
+    )
+    task_marker = f"/contests/{contest_id}/tasks/{task_id}"
+    found: list[tuple[int, str]] = []
+    for row in re.findall(r"<tr\b.*?</tr>", html, flags=re.IGNORECASE | re.DOTALL):
+        if task_marker not in row:
+            continue
+        match = submission_pattern.search(row)
+        if match is not None:
+            found.append((int(match.group(2)), ATCODER_BASE + match.group(1)))
+    if not found:
+        return None
+    return max(found, key=lambda item: item[0])[1]
 
-    oj-api currently reports a generic SubmissionError when AtCoder does not redirect to
-    /submissions/me after POST.  That message can also occur even after a submission was
-    accepted.  Looking at the user's submission list before/after lets us distinguish a
-    real failure from a parser/redirect mismatch without blindly resubmitting code.
-    """
+
+def _latest_submission_url(problem_id: str) -> tuple[bool, str | None]:
     contest_id, task_id = _parse_problem_id(problem_id)
     try:
         import onlinejudge.utils
@@ -204,25 +211,130 @@ def _latest_submission_url(problem_id: str) -> tuple[bool, str | None]:
             )
             if response.status_code != 200 or "/login" in response.url:
                 return False, None
-            html = response.text
+            html = response.content.decode(response.encoding or "utf-8", errors="replace")
     except Exception:
         return False, None
 
-    submission_pattern = re.compile(
-        rf'href=["\'](/contests/{re.escape(contest_id)}/submissions/(\d+))["\']'
-    )
-    task_marker = f"/contests/{contest_id}/tasks/{task_id}"
-    found: list[tuple[int, str]] = []
-    for row in re.findall(r"<tr\b.*?</tr>", html, flags=re.IGNORECASE | re.DOTALL):
-        if task_marker not in row:
-            continue
-        match = submission_pattern.search(row)
-        if match is not None:
-            found.append((int(match.group(2)), ATCODER_BASE + match.group(1)))
+    return True, _submission_url_from_html(contest_id, task_id, html)
 
-    if not found:
-        return True, None
-    return True, max(found, key=lambda item: item[0])[1]
+
+def _extract_alerts(html: str) -> list[str]:
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        result: list[str] = []
+        for alert in soup.find_all("div", attrs={"role": "alert"}):
+            text = " ".join(part.strip() for part in alert.stripped_strings if part.strip())
+            if text:
+                result.append(text)
+        return result
+    except Exception:
+        return []
+
+
+def _submit_direct(problem_id: str, code: str, language_id: str) -> str:
+    """Submit using AtCoder's HTML form directly.
+
+    online-judge-api-client currently wraps the submit form with FormSender and reports
+    every non-/submissions/me result as "it may be a rate limit".  Current AtCoder can
+    reject that generated form payload with only a generic "Error." alert.  Use the same
+    cookie jar, but post the four fields AtCoder's form actually requires.
+    """
+    contest_id, task_id = _parse_problem_id(problem_id)
+    submit_url = f"{ATCODER_BASE}/contests/{contest_id}/submit"
+
+    try:
+        import onlinejudge.utils
+        from bs4 import BeautifulSoup
+
+        session = onlinejudge.utils.get_default_session()
+        with onlinejudge.utils.with_cookiejar(session):
+            get_response = session.get(submit_url, timeout=15.0, allow_redirects=True)
+            if "/login" in get_response.url:
+                raise AtCoderSubmitError("AtCoder のログインセッションが切れています。")
+            if get_response.status_code != 200:
+                raise AtCoderSubmitError(f"AtCoder 提出ページの取得に失敗しました: HTTP {get_response.status_code}")
+
+            get_response.encoding = "utf-8"
+            soup = BeautifulSoup(get_response.text, "html.parser")
+            form = soup.find("form", action=f"/contests/{contest_id}/submit")
+            if form is None:
+                raise AtCoderSubmitError("AtCoder の提出フォームを見つけられませんでした。")
+
+            csrf_input = form.find("input", attrs={"name": "csrf_token"})
+            csrf_token = csrf_input.get("value") if csrf_input is not None else None
+            if not isinstance(csrf_token, str) or not csrf_token:
+                raise AtCoderSubmitError("AtCoder の csrf_token を取得できませんでした。")
+
+            task_select = form.find("select", attrs={"name": "data.TaskScreenName"})
+            task_option = task_select.find("option", attrs={"value": task_id}) if task_select is not None else None
+            if task_option is None:
+                raise AtCoderSubmitError(f"提出フォームに問題 {task_id} がありません。")
+
+            language_select = form.find("select", attrs={"name": "data.LanguageId"})
+            language_option = (
+                language_select.find("option", attrs={"value": str(language_id)})
+                if language_select is not None
+                else None
+            )
+            if language_option is None:
+                raise AtCoderSubmitError(f"提出フォームに言語ID {language_id} がありません。")
+
+            post_response = session.post(
+                submit_url,
+                data={
+                    "csrf_token": csrf_token,
+                    "data.TaskScreenName": task_id,
+                    "data.LanguageId": str(language_id),
+                    "sourceCode": code,
+                },
+                headers={"Referer": submit_url},
+                timeout=20.0,
+                allow_redirects=True,
+            )
+            post_response.encoding = "utf-8"
+
+            if post_response.status_code == 429:
+                raise AtCoderSubmitError("AtCoder が HTTP 429 を返しました。少し待ってから再提出してください。")
+            if post_response.status_code >= 400:
+                raise AtCoderSubmitError(
+                    f"AtCoder 提出POSTに失敗しました: HTTP {post_response.status_code} ({post_response.url})"
+                )
+
+            if "/login" in post_response.url:
+                raise AtCoderSubmitError("提出時にAtCoderのログインセッションが切れました。")
+
+            submission_url = _submission_url_from_html(contest_id, task_id, post_response.text)
+            if submission_url is not None:
+                return submission_url
+
+            alerts = _extract_alerts(post_response.text)
+            if alerts:
+                raise AtCoderSubmitError(
+                    "AtCoder: " + " / ".join(alerts) + f" (HTTP {post_response.status_code}, {post_response.url})"
+                )
+
+            # Successful submissions normally land on /submissions/me. If the page shape
+            # changes, inspect the authenticated list once before declaring failure.
+            if "/submissions/me" in post_response.url:
+                list_response = session.get(
+                    f"{ATCODER_BASE}/contests/{contest_id}/submissions/me",
+                    params={"f.Task": task_id, "orderBy": "created", "desc": "true"},
+                    timeout=12.0,
+                )
+                list_response.encoding = "utf-8"
+                submission_url = _submission_url_from_html(contest_id, task_id, list_response.text)
+                if submission_url is not None:
+                    return submission_url
+
+            raise AtCoderSubmitError(
+                f"AtCoder は提出を受理しませんでした: HTTP {post_response.status_code}, {post_response.url}"
+            )
+    except AtCoderSubmitError:
+        raise
+    except Exception as error:
+        raise AtCoderSubmitError(f"AtCoder 直接提出に失敗しました: {type(error).__name__}: {error}") from error
 
 
 def session_status() -> dict[str, Any]:
@@ -270,42 +382,14 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
         language = _select_python_language(url, source_path)
         language_id = language["id"]
         language_description = language["description"]
+        submission_url = _submit_direct(problem_id, code, language_id)
 
-        try:
-            submission = _run_oj_api(
-                [
-                    "submit-code",
-                    url,
-                    "--file",
-                    str(source_path),
-                    "--language",
-                    language_id,
-                ],
-                timeout_seconds=45.0,
-            )
-        except AtCoderSubmitError as error:
-            # The upstream client uses this generic message whenever AtCoder does not end
-            # on /submissions/me.  Verify the submission list before declaring failure.
-            if SUBMISSION_ERROR_MARKER in str(error):
-                after_ok, after_submission = _latest_submission_url(problem_id)
-                if before_ok and after_ok and after_submission is not None and after_submission != before_submission:
-                    return {
-                        "url": after_submission,
-                        "problemUrl": url,
-                        "languageId": language_id,
-                        "languageDescription": language_description,
-                    }
-            raise
-
-    submission_url = str(submission.get("url", "")).strip()
-    if not re.fullmatch(r"https://atcoder\.jp/contests/[a-z0-9_-]+/submissions/\d+", submission_url):
-        # Also recover from an upstream response-shape change if the submission list proves
-        # that a new submission exists.
+    # Do not silently accept an old submission if AtCoder returned a stale page.
+    if before_ok and before_submission is not None and submission_url == before_submission:
         after_ok, after_submission = _latest_submission_url(problem_id)
-        if before_ok and after_ok and after_submission is not None and after_submission != before_submission:
-            submission_url = after_submission
-        else:
-            raise AtCoderSubmitError("提出は完了した可能性がありますが、提出URLを確認できませんでした。")
+        if not after_ok or after_submission is None or after_submission == before_submission:
+            raise AtCoderSubmitError("AtCoder の提出一覧に新しい提出が現れませんでした。")
+        submission_url = after_submission
 
     return {
         "url": submission_url,
