@@ -1,3 +1,7 @@
 {
-  "block.atcrafter.terminal": "AtCrafter Terminal"
+  "block.atcrafter.terminal": "AtCrafter Terminal",
+  "key.categories.atcrafter": "AtCrafter",
+  "key.atcrafter.debug_previous": "Debug: Previous Step",
+  "key.atcrafter.debug_next": "Debug: Next Step",
+  "key.atcrafter.debug_exit": "Exit Debug World"
 }
