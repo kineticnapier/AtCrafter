@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sysconfig
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,18 @@ def problem_url(problem_id: str) -> str:
 
 
 def _oj_api_path() -> str | None:
-    return shutil.which("oj-api")
+    executable = shutil.which("oj-api")
+    if executable is not None:
+        return executable
+
+    scripts = sysconfig.get_path("scripts")
+    if scripts:
+        scripts_dir = Path(scripts)
+        for name in ("oj-api.exe", "oj-api"):
+            candidate = scripts_dir / name
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 def _run_oj_api(arguments: list[str], timeout_seconds: float = 30.0) -> dict[str, Any]:
