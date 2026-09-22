@@ -23,6 +23,7 @@ PROBLEMS_DIR = ROOT_DIR / "problems"
 DEBUG_DRIVER = r'''
 import io
 import json
+import math
 import sys
 import traceback
 
@@ -31,7 +32,8 @@ TRACE_FILE = sys.argv[2]
 MAX_STEPS = 5000
 MAX_VALUE_CHARS = 240
 MAX_STEP_STDOUT_CHARS = 4096
-STDOUT_KEY = "$stdout"
+MAX_COLLECTION_ITEMS = 32
+MAX_DEPTH = 2
 steps = []
 trace_truncated = False
 last_stdout_snapshot = None
@@ -73,12 +75,73 @@ def safe_repr(value):
     return text
 
 
+def encode_value(value, depth=0):
+    display = safe_repr(value)
+
+    if value is None:
+        return {"type": "none", "display": display}
+    if type(value) is bool:
+        return {"type": "bool", "display": display, "boolValue": value}
+    if type(value) is int:
+        return {"type": "int", "display": display, "numberText": str(value)}
+    if type(value) is float:
+        number_text = str(value) if math.isfinite(value) else display
+        return {"type": "float", "display": display, "numberText": number_text}
+    if type(value) is str:
+        text = value
+        if len(text) > MAX_VALUE_CHARS:
+            text = text[: MAX_VALUE_CHARS - 3] + "..."
+        return {"type": "str", "display": display, "text": text}
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        type_name = type(value).__name__
+        if depth >= MAX_DEPTH:
+            return {"type": type_name, "display": display, "items": [], "truncated": True}
+        try:
+            sequence = list(value)
+        except Exception:
+            return {"type": type_name, "display": display, "items": [], "truncated": True}
+        items = [encode_value(item, depth + 1) for item in sequence[:MAX_COLLECTION_ITEMS]]
+        return {
+            "type": type_name,
+            "display": display,
+            "items": items,
+            "truncated": len(sequence) > MAX_COLLECTION_ITEMS,
+        }
+
+    if isinstance(value, dict):
+        if depth >= MAX_DEPTH:
+            return {"type": "dict", "display": display, "entries": [], "truncated": True}
+        entries = []
+        try:
+            source = list(value.items())
+        except Exception:
+            source = []
+        for key, item in source[:MAX_COLLECTION_ITEMS]:
+            entries.append({
+                "key": encode_value(key, depth + 1),
+                "value": encode_value(item, depth + 1),
+            })
+        return {
+            "type": "dict",
+            "display": display,
+            "entries": entries,
+            "truncated": len(source) > MAX_COLLECTION_ITEMS,
+        }
+
+    return {
+        "type": "object",
+        "display": display,
+        "className": type(value).__name__,
+    }
+
+
 def snapshot(frame):
     result = {}
     for name, value in frame.f_locals.items():
         if name.startswith("__"):
             continue
-        result[str(name)] = safe_repr(value)
+        result[str(name)] = encode_value(value)
     return result
 
 
@@ -91,16 +154,16 @@ def tracer(frame, event, arg):
     global trace_truncated, last_stdout_snapshot
     if frame.f_code.co_filename == TARGET and event in ("line", "return"):
         if len(steps) < MAX_STEPS:
-            locals_snapshot = snapshot(frame)
-            stdout_snapshot = captured_stdout.snapshot()
-            if stdout_snapshot != last_stdout_snapshot:
-                locals_snapshot[STDOUT_KEY] = stdout_snapshot
-                last_stdout_snapshot = stdout_snapshot
-            steps.append({
+            step = {
                 "line": frame.f_lineno,
                 "event": event,
-                "locals": locals_snapshot,
-            })
+                "locals": snapshot(frame),
+            }
+            stdout_snapshot = captured_stdout.snapshot()
+            if stdout_snapshot != last_stdout_snapshot:
+                step["stdout"] = stdout_snapshot
+                last_stdout_snapshot = stdout_snapshot
+            steps.append(step)
         else:
             trace_truncated = True
     return tracer
@@ -337,7 +400,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.4"
+    server_version = "AtCrafterRunner/0.5"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -357,7 +420,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.4",
+                    "runnerVersion": "0.5",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
