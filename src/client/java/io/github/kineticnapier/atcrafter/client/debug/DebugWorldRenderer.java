@@ -41,7 +41,26 @@ public final class DebugWorldRenderer {
         return active;
     }
 
+    /**
+     * Public entry point. In singleplayer this first moves the player into atcrafter:debug,
+     * then the controller calls {@link #activateHere(RunnerClient.DebugResult, int)} after
+     * the client has actually switched dimensions.
+     */
     public static void activate(RunnerClient.DebugResult result, int requestedStep) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null || result == null || result.steps().isEmpty()) {
+            return;
+        }
+
+        if (!DebugDimensionController.isInDebugDimension(minecraft)) {
+            DebugDimensionController.enter(result, requestedStep);
+            return;
+        }
+
+        activateHere(result, requestedStep);
+    }
+
+    static void activateHere(RunnerClient.DebugResult result, int requestedStep) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || result == null || result.steps().isEmpty()) {
             return;
