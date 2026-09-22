@@ -21,7 +21,7 @@ import org.lwjgl.glfw.GLFW;
 /**
  * Small MCEF-backed browser used for AtCoder's human-confirmed web submission flow.
  *
- * The source code is copied to the OS clipboard before this screen opens.  AtCoder's
+ * The source code is copied to the OS clipboard before this screen opens. AtCoder's
  * own submit page remains responsible for login, CAPTCHA/Turnstile, language choice,
  * and the final submit click.
  */
@@ -171,6 +171,11 @@ public final class AtCoderBrowserScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // Screen#render applies Minecraft's menu-background blur. Render it first so it
+        // only affects the world behind this screen; drawing the MCEF texture before
+        // super.render() makes Chromium itself get blurred into an unreadable image.
+        super.render(graphics, mouseX, mouseY, partialTick);
+
         if (this.browser != null && this.browser.getRenderer().getTextureID() != 0) {
             RenderSystem.disableDepthTest();
             RenderSystem.setShader(GameRenderer::getPositionTexColorShader);
@@ -205,8 +210,9 @@ public final class AtCoderBrowserScreen extends Screen {
             );
         }
 
-        graphics.fill(0, 0, this.width, TOP, 0xEE101010);
-        super.render(graphics, mouseX, mouseY, partialTick);
+        // The browser starts below TOP, so widgets drawn by super.render() remain visible.
+        // Only paint a small status strip that does not cover the two buttons.
+        graphics.fill(LEFT + 124, 4, this.width - RIGHT, 24, 0xEE101010);
         graphics.drawString(this.font, Component.literal(this.status), LEFT + 128, 10, 0xE0E0E0);
     }
 
