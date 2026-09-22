@@ -3,6 +3,7 @@ package io.github.kineticnapier.atcrafter.client.debug;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
+import java.util.List;
 import java.util.Map;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
@@ -123,12 +124,43 @@ public final class DebugWorldRenderer {
 
         RunnerClient.DebugStep step = debugResult.steps().get(stepIndex);
         Vec3 camera = context.camera().getPosition();
-        RenderType lineType = RenderType.lines();
-        VertexConsumer lineConsumer = consumers.getBuffer(lineType);
+        List<Map.Entry<String, String>> variables = step.locals().entrySet().stream()
+            .filter(entry -> !entry.getKey().equals(STDOUT_KEY))
+            .limit(MAX_VARIABLES)
+            .toList();
+        int totalVariables = countVisibleLocals(step);
+        BlockPos stdoutPosition = origin.relative(right, -2);
 
         poseStack.pushPose();
         poseStack.translate(-camera.x, -camera.y, -camera.z);
 
+        // Draw every line primitive in one uninterrupted batch. Text rendering may switch/end
+        // BufferSource builders, so keeping a VertexConsumer alive across drawInBatch() calls
+        // can leave it pointing at a BufferBuilder that is no longer building.
+        RenderType lineType = RenderType.lines();
+        VertexConsumer lineConsumer = consumers.getBuffer(lineType);
+
+        for (int i = 0; i < variables.size(); i++) {
+            BlockPos position = variablePosition(i);
+            AABB box = new AABB(position).inflate(0.002);
+            LevelRenderer.renderLineBox(poseStack, lineConsumer, box, 0.2f, 0.85f, 1.0f, 0.9f);
+        }
+
+        LevelRenderer.renderLineBox(
+            poseStack,
+            lineConsumer,
+            new AABB(stdoutPosition).inflate(0.002),
+            0.3f,
+            1.0f,
+            0.4f,
+            0.9f
+        );
+
+        if (consumers instanceof MultiBufferSource.BufferSource bufferSource) {
+            bufferSource.endBatch(lineType);
+        }
+
+        // Render labels only after the line batch is complete.
         renderWorldLabel(
             poseStack,
             consumers,
@@ -140,23 +172,9 @@ public final class DebugWorldRenderer {
             0xFFFFFF55
         );
 
-        int rendered = 0;
-        for (Map.Entry<String, String> entry : step.locals().entrySet()) {
-            if (entry.getKey().equals(STDOUT_KEY)) {
-                continue;
-            }
-            if (rendered >= MAX_VARIABLES) {
-                break;
-            }
-
-            int column = rendered % COLUMNS;
-            int row = rendered / COLUMNS;
-            BlockPos position = origin
-                .relative(right, column * 2)
-                .relative(forward, row * 2);
-
-            AABB box = new AABB(position).inflate(0.002);
-            LevelRenderer.renderLineBox(poseStack, lineConsumer, box, 0.2f, 0.85f, 1.0f, 0.9f);
+        for (int i = 0; i < variables.size(); i++) {
+            Map.Entry<String, String> entry = variables.get(i);
+            BlockPos position = variablePosition(i);
             renderWorldLabel(
                 poseStack,
                 consumers,
@@ -167,14 +185,11 @@ public final class DebugWorldRenderer {
                 truncateLabel(entry.getKey() + " = " + entry.getValue(), 72),
                 0xFFFFFFFF
             );
-            rendered++;
         }
 
-        int hidden = countVisibleLocals(step) - rendered;
+        int hidden = totalVariables - variables.size();
         if (hidden > 0) {
-            BlockPos position = origin
-                .relative(right, rendered % COLUMNS * 2)
-                .relative(forward, rendered / COLUMNS * 2);
+            BlockPos position = variablePosition(variables.size());
             renderWorldLabel(
                 poseStack,
                 consumers,
@@ -188,16 +203,6 @@ public final class DebugWorldRenderer {
         }
 
         String stdout = stdoutAtStep(stepIndex);
-        BlockPos stdoutPosition = origin.relative(right, -2);
-        LevelRenderer.renderLineBox(
-            poseStack,
-            lineConsumer,
-            new AABB(stdoutPosition).inflate(0.002),
-            0.3f,
-            1.0f,
-            0.4f,
-            0.9f
-        );
         renderWorldLabel(
             poseStack,
             consumers,
@@ -210,10 +215,14 @@ public final class DebugWorldRenderer {
         );
 
         poseStack.popPose();
+    }
 
-        if (consumers instanceof MultiBufferSource.BufferSource bufferSource) {
-            bufferSource.endBatch(lineType);
-        }
+    private static BlockPos variablePosition(int index) {
+        int column = index % COLUMNS;
+        int row = index / COLUMNS;
+        return origin
+            .relative(right, column * 2)
+            .relative(forward, row * 2);
     }
 
     private static int countVisibleLocals(RunnerClient.DebugStep step) {
