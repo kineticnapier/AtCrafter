@@ -215,7 +215,6 @@ public final class DebugDimensionController {
         minecart.setSilent(true);
         minecart.setNoGravity(true);
         minecart.noPhysics = true;
-        minecart.setCanUseRail(false);
         level.addFreshEntity(minecart);
         placedMinecarts.add(minecart);
 
@@ -402,7 +401,8 @@ public final class DebugDimensionController {
     /**
      * A visual-only cart for the debugger. Vanilla minecarts push each other during their tick,
      * which made popleft/pop animations bump the stationary deque elements. These carts keep the
-     * normal minecart renderer but deliberately opt out of entity collision and rail physics.
+     * normal minecart renderer but opt out of entity collision; AtCrafter controls their animation
+     * positions directly while gravity/normal collision movement is disabled.
      */
     private static final class DebugMinecart extends Minecart {
         private DebugMinecart(Level level, double x, double y, double z) {
