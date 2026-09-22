@@ -183,8 +183,9 @@ public final class DebugWorldRenderer {
             RunnerClient.DebugValue item = value.items().get(i);
             RunnerClient.DebugValue previous = previousSequenceItem(name, value, i, item);
             boolean changed = sequenceItemChanged(name, value, i, item, previous);
+            CollectionAccess access = value.isSetLike() ? CollectionAccess.NONE : collectionAccess(name, i);
             BlockPos position = base.relative(RIGHT, i);
-            blocks.put(position, collectionItemBlock(value, item, changed));
+            blocks.put(position, collectionItemBlock(value, item, changed, access));
 
             String itemName;
             String hoverName;
@@ -200,6 +201,7 @@ public final class DebugWorldRenderer {
                 position,
                 hoverName + " = " + truncateLabel(item.display(), 64)
                     + "  (" + item.type() + ")"
+                    + accessSuffix(access)
                     + changeSuffix(changed, previous)
             );
             nameplates.put(
@@ -207,7 +209,7 @@ public final class DebugWorldRenderer {
                 twoLineNameplate(
                     itemName,
                     truncateLabel(item.display(), 28),
-                    changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+                    sequenceColor(changed, access)
                 )
             );
         }
@@ -423,8 +425,15 @@ public final class DebugWorldRenderer {
     private static BlockState collectionItemBlock(
         RunnerClient.DebugValue container,
         RunnerClient.DebugValue item,
-        boolean changed
+        boolean changed,
+        CollectionAccess access
     ) {
+        if (access == CollectionAccess.WRITE || access == CollectionAccess.READ_WRITE) {
+            return Blocks.GOLD_BLOCK.defaultBlockState();
+        }
+        if (access == CollectionAccess.READ) {
+            return Blocks.SEA_LANTERN.defaultBlockState();
+        }
         if (changed) {
             return Blocks.YELLOW_CONCRETE.defaultBlockState();
         }
@@ -432,6 +441,51 @@ public final class DebugWorldRenderer {
             return Blocks.CYAN_CONCRETE.defaultBlockState();
         }
         return blockFor(item, false);
+    }
+
+    private static ChatFormatting sequenceColor(boolean changed, CollectionAccess access) {
+        if (access == CollectionAccess.WRITE || access == CollectionAccess.READ_WRITE) {
+            return ChatFormatting.GOLD;
+        }
+        if (access == CollectionAccess.READ) {
+            return ChatFormatting.AQUA;
+        }
+        return changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE;
+    }
+
+    private static String accessSuffix(CollectionAccess access) {
+        return switch (access) {
+            case READ -> "  ← READ";
+            case WRITE -> "  ← WRITE";
+            case READ_WRITE -> "  ← READ / WRITE";
+            case NONE -> "";
+        };
+    }
+
+    private static CollectionAccess collectionAccess(String variable, int index) {
+        if (debugResult == null || stepIndex < 0 || stepIndex >= debugResult.steps().size()) {
+            return CollectionAccess.NONE;
+        }
+
+        boolean read = false;
+        boolean write = false;
+        for (RunnerClient.DebugAccess access : debugResult.steps().get(stepIndex).accesses()) {
+            if (!access.variable().equals(variable) || access.index() != index) {
+                continue;
+            }
+            read |= access.isRead();
+            write |= access.isWrite();
+        }
+        if (read && write) {
+            return CollectionAccess.READ_WRITE;
+        }
+        if (write) {
+            return CollectionAccess.WRITE;
+        }
+        if (read) {
+            return CollectionAccess.READ;
+        }
+        return CollectionAccess.NONE;
     }
 
     private static BlockState blockFor(RunnerClient.DebugValue value, boolean changed) {
@@ -621,14 +675,25 @@ public final class DebugWorldRenderer {
         }
         RunnerClient.DebugStep step = debugResult.steps().get(stepIndex);
         String dequeOperation = dequeOperationSummary(step);
+        String access = accessSummary(step);
+        String detail = !dequeOperation.isEmpty() ? dequeOperation : access;
         minecraft.player.displayClientMessage(
             Component.literal(
                 "AtCrafter " + (stepIndex + 1) + "/" + debugResult.steps().size()
                     + "  行 " + step.line()
-                    + (dequeOperation.isEmpty() ? "" : "  |  " + dequeOperation)
+                    + (detail.isEmpty() ? "" : "  |  " + detail)
             ),
             true
         );
+    }
+
+    private static String accessSummary(RunnerClient.DebugStep step) {
+        if (step.accesses().isEmpty()) {
+            return "";
+        }
+        RunnerClient.DebugAccess access = step.accesses().get(0);
+        return (access.isWrite() ? "WRITE " : "READ ")
+            + access.variable() + "[" + access.index() + "]";
     }
 
     private static String dequeOperationSummary(RunnerClient.DebugStep step) {
@@ -713,6 +778,13 @@ public final class DebugWorldRenderer {
             return normalized;
         }
         return normalized.substring(0, Math.max(0, limit - 3)) + "...";
+    }
+
+    private enum CollectionAccess {
+        NONE,
+        READ,
+        WRITE,
+        READ_WRITE
     }
 
     private enum DequeOperation {
