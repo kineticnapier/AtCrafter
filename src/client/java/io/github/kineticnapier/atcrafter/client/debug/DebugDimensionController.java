@@ -18,14 +18,16 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Display;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.vehicle.Minecart;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Moves the local singleplayer player into AtCrafter's dedicated debug dimension and owns
- * the real blocks and text-display nameplates used by the debug visualizer.
+ * the real blocks, text-display nameplates and minecarts used by the debug visualizer.
  */
 public final class DebugDimensionController {
     public static final ResourceKey<Level> DEBUG_LEVEL = ResourceKey.create(
@@ -35,7 +37,7 @@ public final class DebugDimensionController {
 
     static final BlockPos DEBUG_ORIGIN = new BlockPos(0, -63, 0);
     static final int WORKSPACE_MIN_X = -4;
-    static final int WORKSPACE_MAX_X = 14;
+    static final int WORKSPACE_MAX_X = 28;
     static final int WORKSPACE_MIN_Z = -36;
     static final int WORKSPACE_MAX_Z = 2;
 
@@ -47,6 +49,7 @@ public final class DebugDimensionController {
 
     private static final Set<BlockPos> placedBlocks = new HashSet<>();
     private static final List<Display.TextDisplay> placedLabels = new ArrayList<>();
+    private static final List<Minecart> placedMinecarts = new ArrayList<>();
     private static boolean workspaceInitialized;
 
     private static volatile ReturnPoint returnPoint;
@@ -104,9 +107,6 @@ public final class DebugDimensionController {
                 );
             }
 
-            // Clear persisted labels/blocks before the player arrives. Previously this cleanup
-            // only happened when the first new visualization was built, so stale nameplates
-            // could be visible briefly after entering the debug dimension.
             clearWorkspace(debugLevel);
             workspaceInitialized = true;
 
@@ -138,8 +138,12 @@ public final class DebugDimensionController {
         DebugWorldRenderer.activateHere(result, step);
     }
 
-    /** Replace the current visualization with real blocks and server-side text displays. */
-    static void replaceDebugBlocks(Map<BlockPos, BlockState> blocks, Map<BlockPos, Component> labels) {
+    /** Replace the current visualization with real blocks, labels and deque minecarts. */
+    static void replaceDebugObjects(
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, Component> labels,
+        Map<BlockPos, Component> minecarts
+    ) {
         Minecraft minecraft = Minecraft.getInstance();
         IntegratedServer server = minecraft.getSingleplayerServer();
         if (server == null) {
@@ -148,6 +152,7 @@ public final class DebugDimensionController {
 
         Map<BlockPos, BlockState> requestedBlocks = Map.copyOf(blocks);
         Map<BlockPos, Component> requestedLabels = Map.copyOf(labels);
+        Map<BlockPos, Component> requestedMinecarts = Map.copyOf(minecarts);
         server.execute(() -> {
             ServerLevel debugLevel = server.getLevel(DEBUG_LEVEL);
             if (debugLevel == null) {
@@ -170,6 +175,10 @@ public final class DebugDimensionController {
             for (Map.Entry<BlockPos, Component> entry : requestedLabels.entrySet()) {
                 spawnNameplate(debugLevel, entry.getKey(), entry.getValue());
             }
+
+            for (Map.Entry<BlockPos, Component> entry : requestedMinecarts.entrySet()) {
+                spawnMinecart(debugLevel, entry.getKey(), entry.getValue());
+            }
         });
     }
 
@@ -187,6 +196,22 @@ public final class DebugDimensionController {
         display.setViewRange(1.0F);
         level.addFreshEntity(display);
         placedLabels.add(display);
+    }
+
+    private static void spawnMinecart(ServerLevel level, BlockPos railPosition, Component detail) {
+        Minecart minecart = new Minecart(
+            level,
+            railPosition.getX() + 0.5,
+            railPosition.getY() + 0.0625,
+            railPosition.getZ() + 0.5
+        );
+        minecart.setDeltaMovement(Vec3.ZERO);
+        minecart.setCustomName(detail);
+        minecart.setCustomNameVisible(false);
+        minecart.setInvulnerable(true);
+        minecart.setSilent(true);
+        level.addFreshEntity(minecart);
+        placedMinecarts.add(minecart);
     }
 
     public static void exit() {
@@ -259,10 +284,7 @@ public final class DebugDimensionController {
         }
         placedBlocks.clear();
 
-        // The in-memory list is lost when the client restarts, but TextDisplay entities are
-        // persisted in the debug dimension. Sweep the whole AtCrafter workspace as well so
-        // labels from a previous run/old renderer cannot survive forever.
-        AABB labelArea = new AABB(
+        AABB objectArea = new AABB(
             WORKSPACE_MIN_X,
             DEBUG_ORIGIN.getY(),
             WORKSPACE_MIN_Z,
@@ -270,10 +292,17 @@ public final class DebugDimensionController {
             DEBUG_ORIGIN.getY() + 6,
             WORKSPACE_MAX_Z + 1
         );
-        for (Display.TextDisplay label : level.getEntitiesOfClass(Display.TextDisplay.class, labelArea)) {
+
+        // These entities persist with the dimension, while our in-memory lists do not.
+        // Sweep the whole dedicated workspace so a crash/restart cannot leave ghosts behind.
+        for (Display.TextDisplay label : level.getEntitiesOfClass(Display.TextDisplay.class, objectArea)) {
             label.discard();
         }
+        for (Minecart minecart : level.getEntitiesOfClass(Minecart.class, objectArea)) {
+            minecart.discard();
+        }
         placedLabels.clear();
+        placedMinecarts.clear();
     }
 
     private static void clearWorkspace(ServerLevel level) {
