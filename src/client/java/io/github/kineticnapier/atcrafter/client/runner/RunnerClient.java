@@ -139,6 +139,26 @@ public final class RunnerClient {
                             displayLocals.put(entry.getKey(), value.display());
                         }
                     }
+
+                    List<DebugAccess> accesses = new ArrayList<>();
+                    JsonArray accessArray = step.getAsJsonArray("accesses");
+                    if (accessArray != null) {
+                        for (JsonElement accessElement : accessArray) {
+                            if (!accessElement.isJsonObject()) {
+                                continue;
+                            }
+                            JsonObject access = accessElement.getAsJsonObject();
+                            if (!access.has("kind") || !access.has("variable") || !access.has("index")) {
+                                continue;
+                            }
+                            accesses.add(new DebugAccess(
+                                access.get("kind").getAsString(),
+                                access.get("variable").getAsString(),
+                                access.get("index").getAsInt()
+                            ));
+                        }
+                    }
+
                     String stdout = step.has("stdout") && !step.get("stdout").isJsonNull()
                         ? step.get("stdout").getAsString()
                         : null;
@@ -150,6 +170,7 @@ public final class RunnerClient {
                         step.get("event").getAsString(),
                         Collections.unmodifiableMap(new LinkedHashMap<>(displayLocals)),
                         Collections.unmodifiableMap(new LinkedHashMap<>(typedLocals)),
+                        List.copyOf(accesses),
                         stdout
                     ));
                 }
@@ -347,11 +368,22 @@ public final class RunnerClient {
     public record DebugEntry(DebugValue key, DebugValue value) {
     }
 
+    public record DebugAccess(String kind, String variable, int index) {
+        public boolean isRead() {
+            return kind.equals("read");
+        }
+
+        public boolean isWrite() {
+            return kind.equals("write");
+        }
+    }
+
     public record DebugStep(
         int line,
         String event,
         Map<String, String> locals,
         Map<String, DebugValue> typedLocals,
+        List<DebugAccess> accesses,
         String stdout
     ) {
     }
