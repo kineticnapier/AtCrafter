@@ -1,24 +1,19 @@
 package io.github.kineticnapier.atcrafter.client.debug;
 
-import com.mojang.blaze3d.vertex.PoseStack;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.Vec3;
 
 public final class DebugWorldRenderer {
     private static final int MAX_VARIABLES = 12;
@@ -31,24 +26,18 @@ public final class DebugWorldRenderer {
     private static int stepIndex = -1;
     private static boolean active;
     private static Map<BlockPos, String> hoverLabels = Map.of();
-    private static Map<BlockPos, Nameplate> nameplates = Map.of();
 
     private DebugWorldRenderer() {
     }
 
     public static void register() {
         HudRenderCallback.EVENT.register((graphics, tickDelta) -> renderHud(graphics));
-        WorldRenderEvents.AFTER_TRANSLUCENT.register(DebugWorldRenderer::renderNameplates);
     }
 
     public static boolean isActive() {
         return active;
     }
 
-    /**
-     * Public entry point. In singleplayer this first moves the player into atcrafter:debug,
-     * then the controller calls activateHere after the client has actually switched dimensions.
-     */
     public static void activate(RunnerClient.DebugResult result, int requestedStep) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || result == null || result.steps().isEmpty()) {
@@ -102,7 +91,6 @@ public final class DebugWorldRenderer {
     public static void deactivate() {
         active = false;
         hoverLabels = Map.of();
-        nameplates = Map.of();
     }
 
     private static void rebuildBlocks() {
@@ -117,7 +105,7 @@ public final class DebugWorldRenderer {
 
         Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
         Map<BlockPos, String> labels = new LinkedHashMap<>();
-        Map<BlockPos, Nameplate> plates = new LinkedHashMap<>();
+        Map<BlockPos, Component> nameplates = new LinkedHashMap<>();
 
         for (int row = 0; row < variables.size(); row++) {
             Map.Entry<String, RunnerClient.DebugValue> entry = variables.get(row);
@@ -138,12 +126,12 @@ public final class DebugWorldRenderer {
                             + "  (" + item.type() + ")"
                             + (changed ? "  ← changed" : "")
                     );
-                    plates.put(
+                    nameplates.put(
                         position,
-                        new Nameplate(
+                        twoLineNameplate(
                             name + "[" + i + "]",
                             truncateLabel(item.display(), 28),
-                            changed ? 0xFFFFFF55 : 0xFFFFFFFF
+                            changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
                         )
                     );
                 }
@@ -158,12 +146,12 @@ public final class DebugWorldRenderer {
                     + "  (" + value.type() + ")"
                     + (changed ? "  ← changed" : "")
             );
-            plates.put(
+            nameplates.put(
                 base,
-                new Nameplate(
+                twoLineNameplate(
                     name,
                     truncateLabel(value.display(), 32),
-                    changed ? 0xFFFFFF55 : 0xFFFFFFFF
+                    changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
                 )
             );
         }
@@ -177,18 +165,21 @@ public final class DebugWorldRenderer {
                 ? "stdout = (empty)"
                 : "stdout = " + truncateLabel(stdout.replace('\n', ' '), 80)
         );
-        plates.put(
+        nameplates.put(
             stdoutPosition,
-            new Nameplate(
+            twoLineNameplate(
                 "stdout",
                 stdout.isEmpty() ? "(empty)" : truncateLabel(stdout.replace('\n', ' '), 28),
-                0xFF88FF88
+                ChatFormatting.GREEN
             )
         );
 
         hoverLabels = Map.copyOf(labels);
-        nameplates = Map.copyOf(plates);
-        DebugDimensionController.replaceDebugBlocks(blocks);
+        DebugDimensionController.replaceDebugBlocks(blocks, nameplates);
+    }
+
+    private static Component twoLineNameplate(String name, String value, ChatFormatting color) {
+        return Component.literal(name + "\n" + value).withStyle(color);
     }
 
     private static BlockState blockFor(RunnerClient.DebugValue value, boolean changed) {
@@ -248,89 +239,6 @@ public final class DebugWorldRenderer {
         );
     }
 
-    private static void renderNameplates(WorldRenderContext context) {
-        if (!active || nameplates.isEmpty()) {
-            return;
-        }
-
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.player == null || minecraft.level == null || !DebugDimensionController.isInDebugDimension(minecraft)) {
-            return;
-        }
-
-        PoseStack poseStack = context.matrixStack();
-        MultiBufferSource consumers = context.consumers();
-        if (poseStack == null || consumers == null) {
-            return;
-        }
-
-        Vec3 camera = context.camera().getPosition();
-        poseStack.pushPose();
-        poseStack.translate(-camera.x, -camera.y, -camera.z);
-
-        for (Map.Entry<BlockPos, Nameplate> entry : nameplates.entrySet()) {
-            BlockPos position = entry.getKey();
-            Nameplate plate = entry.getValue();
-            renderNameplate(
-                poseStack,
-                consumers,
-                minecraft,
-                position.getX() + 0.5,
-                position.getY() + 1.35,
-                position.getZ() + 0.5,
-                plate
-            );
-        }
-
-        poseStack.popPose();
-    }
-
-    private static void renderNameplate(
-        PoseStack poseStack,
-        MultiBufferSource consumers,
-        Minecraft minecraft,
-        double x,
-        double y,
-        double z,
-        Nameplate plate
-    ) {
-        poseStack.pushPose();
-        poseStack.translate(x, y, z);
-        poseStack.mulPose(minecraft.getEntityRenderDispatcher().cameraOrientation());
-        poseStack.scale(-0.025f, -0.025f, 0.025f);
-
-        float nameX = -minecraft.font.width(plate.name()) / 2.0f;
-        float valueX = -minecraft.font.width(plate.value()) / 2.0f;
-        int background = 0x50000000;
-
-        minecraft.font.drawInBatch(
-            plate.name(),
-            nameX,
-            0,
-            plate.color(),
-            false,
-            poseStack.last().pose(),
-            consumers,
-            Font.DisplayMode.NORMAL,
-            background,
-            0x00F000F0
-        );
-        minecraft.font.drawInBatch(
-            plate.value(),
-            valueX,
-            minecraft.font.lineHeight + 1,
-            plate.color(),
-            false,
-            poseStack.last().pose(),
-            consumers,
-            Font.DisplayMode.NORMAL,
-            background,
-            0x00F000F0
-        );
-
-        poseStack.popPose();
-    }
-
     private static void renderHud(GuiGraphics graphics) {
         if (!active) {
             return;
@@ -386,8 +294,5 @@ public final class DebugWorldRenderer {
             return normalized;
         }
         return normalized.substring(0, Math.max(0, limit - 3)) + "...";
-    }
-
-    private record Nameplate(String name, String value, int color) {
     }
 }
