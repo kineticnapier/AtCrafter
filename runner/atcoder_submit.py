@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 import sysconfig
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -121,10 +120,10 @@ def _version_tuple(description: str) -> tuple[int, int, int]:
     return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
 
 
-def _language_score(language: dict[str, Any]) -> tuple[int, tuple[int, int, int], int]:
-    description = str(language.get("description", ""))
+def _language_score(language: dict[str, str]) -> tuple[int, tuple[int, int, int], int]:
+    description = language["description"]
     lower = description.lower()
-    language_id = str(language.get("id", ""))
+    language_id = language["id"]
     try:
         numeric_id = int(language_id)
     except ValueError:
@@ -143,40 +142,42 @@ def _language_score(language: dict[str, Any]) -> tuple[int, tuple[int, int, int]
     return family_score, _version_tuple(description), numeric_id
 
 
-def _select_python_language(url: str, source_path: Path) -> dict[str, str]:
-    problem = _run_oj_api(["get-problem", url, "--full"], timeout_seconds=30.0)
-    available = problem.get("availableLanguages")
-    if isinstance(available, list):
-        candidates = [item for item in available if isinstance(item, dict) and _language_score(item)[0] >= 0]
-        if candidates:
-            selected = max(candidates, key=_language_score)
-            language_id = str(selected.get("id", "")).strip()
-            description = str(selected.get("description", "")).strip()
-            if language_id:
-                return {
-                    "id": language_id,
-                    "description": description or language_id,
-                }
+def _select_python_language_from_form(form: Any) -> dict[str, str]:
+    """Choose a Python language ID that is actually present in this contest's submit form.
 
-    try:
-        guessed = _run_oj_api(
-            ["guess-language-id", url, "--file", str(source_path)],
-            timeout_seconds=30.0,
-        )
-    except AtCoderSubmitError as error:
+    AtCoder keeps the language set used by older contests.  Asking the task page / API for
+    a current Python ID can therefore produce an ID that does not exist in an old contest's
+    submit form.  The submit form itself is the source of truth.
+    """
+    language_select = form.find("select", attrs={"name": "data.LanguageId"})
+    if language_select is None:
+        language_select = form.find("select", attrs={"data-placeholder": "-"})
+    if language_select is None:
+        raise AtCoderSubmitError("AtCoder の提出フォームから言語一覧を取得できませんでした。")
+
+    candidates: list[dict[str, str]] = []
+    for option in language_select.find_all("option"):
+        value = option.get("value")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        description = " ".join(option.stripped_strings).strip()
+        item = {"id": value.strip(), "description": description or value.strip()}
+        if _language_score(item)[0] >= 0:
+            candidates.append(item)
+
+    if not candidates:
+        descriptions = [
+            " ".join(option.stripped_strings).strip()
+            for option in language_select.find_all("option")
+            if " ".join(option.stripped_strings).strip()
+        ]
+        preview = ", ".join(descriptions[:8])
         raise AtCoderSubmitError(
-            "Python の提出言語を1つに決められませんでした。利用可能言語一覧の取得にも失敗しました: "
-            + str(error)
-        ) from error
+            "このコンテストの提出フォームに Python がありません。"
+            + (f" 利用可能言語: {preview}" if preview else "")
+        )
 
-    language_id = str(guessed.get("id", "")).strip()
-    description = str(guessed.get("description", "")).strip()
-    if not language_id:
-        raise AtCoderSubmitError("Python の提出言語IDを取得できませんでした。")
-    return {
-        "id": language_id,
-        "description": description or language_id,
-    }
+    return max(candidates, key=_language_score)
 
 
 def _submission_url_from_html(contest_id: str, task_id: str, html: str) -> str | None:
@@ -211,7 +212,8 @@ def _latest_submission_url(problem_id: str) -> tuple[bool, str | None]:
             )
             if response.status_code != 200 or "/login" in response.url:
                 return False, None
-            html = response.content.decode(response.encoding or "utf-8", errors="replace")
+            response.encoding = "utf-8"
+            html = response.text
     except Exception:
         return False, None
 
@@ -233,14 +235,8 @@ def _extract_alerts(html: str) -> list[str]:
         return []
 
 
-def _submit_direct(problem_id: str, code: str, language_id: str) -> str:
-    """Submit using AtCoder's HTML form directly.
-
-    online-judge-api-client currently wraps the submit form with FormSender and reports
-    every non-/submissions/me result as "it may be a rate limit".  Current AtCoder can
-    reject that generated form payload with only a generic "Error." alert.  Use the same
-    cookie jar, but post the four fields AtCoder's form actually requires.
-    """
+def _submit_direct(problem_id: str, code: str) -> dict[str, str]:
+    """Submit using the exact fields and language IDs present in AtCoder's submit form."""
     contest_id, task_id = _parse_problem_id(problem_id)
     submit_url = f"{ATCODER_BASE}/contests/{contest_id}/submit"
 
@@ -272,21 +268,16 @@ def _submit_direct(problem_id: str, code: str, language_id: str) -> str:
             if task_option is None:
                 raise AtCoderSubmitError(f"提出フォームに問題 {task_id} がありません。")
 
-            language_select = form.find("select", attrs={"name": "data.LanguageId"})
-            language_option = (
-                language_select.find("option", attrs={"value": str(language_id)})
-                if language_select is not None
-                else None
-            )
-            if language_option is None:
-                raise AtCoderSubmitError(f"提出フォームに言語ID {language_id} がありません。")
+            language = _select_python_language_from_form(form)
+            language_id = language["id"]
+            language_description = language["description"]
 
             post_response = session.post(
                 submit_url,
                 data={
                     "csrf_token": csrf_token,
                     "data.TaskScreenName": task_id,
-                    "data.LanguageId": str(language_id),
+                    "data.LanguageId": language_id,
                     "sourceCode": code,
                 },
                 headers={"Referer": submit_url},
@@ -301,23 +292,11 @@ def _submit_direct(problem_id: str, code: str, language_id: str) -> str:
                 raise AtCoderSubmitError(
                     f"AtCoder 提出POSTに失敗しました: HTTP {post_response.status_code} ({post_response.url})"
                 )
-
             if "/login" in post_response.url:
                 raise AtCoderSubmitError("提出時にAtCoderのログインセッションが切れました。")
 
             submission_url = _submission_url_from_html(contest_id, task_id, post_response.text)
-            if submission_url is not None:
-                return submission_url
-
-            alerts = _extract_alerts(post_response.text)
-            if alerts:
-                raise AtCoderSubmitError(
-                    "AtCoder: " + " / ".join(alerts) + f" (HTTP {post_response.status_code}, {post_response.url})"
-                )
-
-            # Successful submissions normally land on /submissions/me. If the page shape
-            # changes, inspect the authenticated list once before declaring failure.
-            if "/submissions/me" in post_response.url:
+            if submission_url is None and "/submissions/me" in post_response.url:
                 list_response = session.get(
                     f"{ATCODER_BASE}/contests/{contest_id}/submissions/me",
                     params={"f.Task": task_id, "orderBy": "created", "desc": "true"},
@@ -325,12 +304,22 @@ def _submit_direct(problem_id: str, code: str, language_id: str) -> str:
                 )
                 list_response.encoding = "utf-8"
                 submission_url = _submission_url_from_html(contest_id, task_id, list_response.text)
-                if submission_url is not None:
-                    return submission_url
 
-            raise AtCoderSubmitError(
-                f"AtCoder は提出を受理しませんでした: HTTP {post_response.status_code}, {post_response.url}"
-            )
+            if submission_url is None:
+                alerts = _extract_alerts(post_response.text)
+                if alerts:
+                    raise AtCoderSubmitError(
+                        "AtCoder: " + " / ".join(alerts) + f" (HTTP {post_response.status_code}, {post_response.url})"
+                    )
+                raise AtCoderSubmitError(
+                    f"AtCoder は提出を受理しませんでした: HTTP {post_response.status_code}, {post_response.url}"
+                )
+
+            return {
+                "url": submission_url,
+                "languageId": language_id,
+                "languageDescription": language_description,
+            }
     except AtCoderSubmitError:
         raise
     except Exception as error:
@@ -374,15 +363,8 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
 
     url = problem_url(problem_id)
     before_ok, before_submission = _latest_submission_url(problem_id)
-
-    with tempfile.TemporaryDirectory(prefix="atcrafter-submit-") as temp_dir:
-        source_path = Path(temp_dir) / "main.py"
-        source_path.write_text(code, encoding="utf-8", newline="\n")
-
-        language = _select_python_language(url, source_path)
-        language_id = language["id"]
-        language_description = language["description"]
-        submission_url = _submit_direct(problem_id, code, language_id)
+    submitted = _submit_direct(problem_id, code)
+    submission_url = submitted["url"]
 
     # Do not silently accept an old submission if AtCoder returned a stale page.
     if before_ok and before_submission is not None and submission_url == before_submission:
@@ -394,6 +376,6 @@ def submit_code(problem_id: str, code: str) -> dict[str, str]:
     return {
         "url": submission_url,
         "problemUrl": url,
-        "languageId": language_id,
-        "languageDescription": language_description,
+        "languageId": submitted["languageId"],
+        "languageDescription": submitted["languageDescription"],
     }
