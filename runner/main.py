@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+from atcoder import AtCoderError, is_remote_problem_id, list_default_problems, load_remote_problem
+
 HOST = "127.0.0.1"
 PORT = 8765
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -351,6 +353,13 @@ def problem_dirs() -> list[Path]:
 
 
 def load_problem(problem_id: str) -> dict[str, Any] | None:
+    if is_remote_problem_id(problem_id):
+        try:
+            return load_remote_problem(problem_id)
+        except AtCoderError as error:
+            print(f"AtCoder problem load failed: {error}")
+            return None
+
     if not problem_id or problem_id in {".", ".."} or "/" in problem_id or "\\" in problem_id:
         return None
 
@@ -391,6 +400,12 @@ def list_problems() -> list[dict[str, str]]:
         problem = load_problem(directory.name)
         if problem is not None:
             result.append({"id": problem["id"], "title": problem["title"]})
+
+    try:
+        result.extend(list_default_problems())
+    except AtCoderError as error:
+        # AtCoder is an optional online source. Local problems must continue to work offline.
+        print(f"AtCoder problem list unavailable: {error}")
     return result
 
 
@@ -509,7 +524,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.8"
+    server_version = "AtCrafterRunner/0.9"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -529,7 +544,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.8",
+                    "runnerVersion": "0.9",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
@@ -603,6 +618,7 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), RunnerHandler)
     print(f"AtCrafter Runner listening on http://{HOST}:{PORT}")
     print(f"Problems directory: {PROBLEMS_DIR}")
+    print("AtCoder read-only source: latest ABC tasks are appended to the problem list.")
     print("WARNING: code execution is not sandboxed; run only code you trust.")
     try:
         server.serve_forever()
