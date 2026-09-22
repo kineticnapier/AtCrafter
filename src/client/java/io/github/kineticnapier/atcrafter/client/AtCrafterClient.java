@@ -2,6 +2,7 @@ package io.github.kineticnapier.atcrafter.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import io.github.kineticnapier.atcrafter.block.ModBlocks;
+import io.github.kineticnapier.atcrafter.client.debug.DebugDimensionController;
 import io.github.kineticnapier.atcrafter.client.debug.DebugWorldRenderer;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import io.github.kineticnapier.atcrafter.client.screen.TerminalScreen;
@@ -46,6 +47,7 @@ public class AtCrafterClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             RunnerClient.tick();
+            DebugDimensionController.tick(client);
 
             while (this.debugPreviousKey.consumeClick()) {
                 DebugWorldRenderer.previousStep();
@@ -54,7 +56,9 @@ public class AtCrafterClient implements ClientModInitializer {
                 DebugWorldRenderer.nextStep();
             }
             while (this.debugExitKey.consumeClick()) {
-                DebugWorldRenderer.deactivate();
+                if (DebugWorldRenderer.isActive() || DebugDimensionController.isInDebugDimension(client)) {
+                    DebugDimensionController.exit();
+                }
             }
         });
 
