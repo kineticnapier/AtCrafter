@@ -50,7 +50,7 @@ public final class DebugDimensionController {
                 Component.literal("専用デバッグディメンションは現在シングルプレイ専用です。通常世界で表示します。"),
                 false
             );
-            DebugWorldRenderer.activate(result, step);
+            DebugWorldRenderer.activateHere(result, step);
             return;
         }
 
@@ -71,7 +71,7 @@ public final class DebugDimensionController {
                             false
                         );
                     }
-                    DebugWorldRenderer.activate(result, step);
+                    DebugWorldRenderer.activateHere(result, step);
                 });
                 return;
             }
@@ -112,7 +112,7 @@ public final class DebugDimensionController {
         pendingResult = null;
         pendingStep = -1;
         waitingForDebugDimension = false;
-        DebugWorldRenderer.activate(result, step);
+        DebugWorldRenderer.activateHere(result, step);
     }
 
     public static void exit() {
