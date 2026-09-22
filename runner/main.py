@@ -26,6 +26,7 @@ import json
 import math
 import sys
 import traceback
+import types
 from collections import deque
 
 TARGET = sys.argv[1]
@@ -38,6 +39,14 @@ MAX_DEPTH = 2
 steps = []
 trace_truncated = False
 last_stdout_snapshot = None
+
+IGNORED_LOCAL_TYPES = (
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    type,
+)
 
 
 class TeeStdout:
@@ -143,7 +152,7 @@ def encode_value(value, depth=0):
 def snapshot(frame):
     result = {}
     for name, value in frame.f_locals.items():
-        if name.startswith("__"):
+        if name.startswith("__") or isinstance(value, IGNORED_LOCAL_TYPES):
             continue
         result[str(name)] = encode_value(value)
     return result
@@ -404,7 +413,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.6"
+    server_version = "AtCrafterRunner/0.7"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -424,7 +433,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.6",
+                    "runnerVersion": "0.7",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
