@@ -26,6 +26,7 @@ import json
 import math
 import sys
 import traceback
+from collections import deque
 
 TARGET = sys.argv[1]
 TRACE_FILE = sys.argv[2]
@@ -93,12 +94,15 @@ def encode_value(value, depth=0):
             text = text[: MAX_VALUE_CHARS - 3] + "..."
         return {"type": "str", "display": display, "text": text}
 
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (list, tuple, set, frozenset, deque)):
         type_name = type(value).__name__
         if depth >= MAX_DEPTH:
             return {"type": type_name, "display": display, "items": [], "truncated": True}
         try:
-            sequence = list(value)
+            if isinstance(value, (set, frozenset)):
+                sequence = sorted(value, key=safe_repr)
+            else:
+                sequence = list(value)
         except Exception:
             return {"type": type_name, "display": display, "items": [], "truncated": True}
         items = [encode_value(item, depth + 1) for item in sequence[:MAX_COLLECTION_ITEMS]]
@@ -400,7 +404,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.5"
+    server_version = "AtCrafterRunner/0.6"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -420,7 +424,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.5",
+                    "runnerVersion": "0.6",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
