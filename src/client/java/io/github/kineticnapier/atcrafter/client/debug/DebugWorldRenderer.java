@@ -11,9 +11,13 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.vehicle.Minecart;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.RailBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
 
 public final class DebugWorldRenderer {
     private static final int MAX_VARIABLES = 12;
@@ -106,6 +110,7 @@ public final class DebugWorldRenderer {
         Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
         Map<BlockPos, String> labels = new LinkedHashMap<>();
         Map<BlockPos, Component> nameplates = new LinkedHashMap<>();
+        Map<BlockPos, Component> minecarts = new LinkedHashMap<>();
 
         for (int row = 0; row < variables.size(); row++) {
             Map.Entry<String, RunnerClient.DebugValue> entry = variables.get(row);
@@ -115,6 +120,11 @@ public final class DebugWorldRenderer {
 
             if (value.isDict() && !value.entries().isEmpty()) {
                 renderDict(name, value, base, blocks, labels, nameplates);
+                continue;
+            }
+
+            if (value.isDeque() && !value.items().isEmpty()) {
+                renderDeque(name, value, base, blocks, labels, nameplates, minecarts);
                 continue;
             }
 
@@ -129,7 +139,7 @@ public final class DebugWorldRenderer {
         renderStdoutBoard(blocks, labels, nameplates);
 
         hoverLabels = Map.copyOf(labels);
-        DebugDimensionController.replaceDebugBlocks(blocks, nameplates);
+        DebugDimensionController.replaceDebugObjects(blocks, nameplates, minecarts);
     }
 
     private static void renderScalar(
@@ -168,7 +178,6 @@ public final class DebugWorldRenderer {
         Map<BlockPos, Component> nameplates
     ) {
         int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
-        boolean actualBackVisible = count == value.items().size() && !value.truncated();
 
         for (int i = 0; i < count; i++) {
             RunnerClient.DebugValue item = value.items().get(i);
@@ -182,19 +191,6 @@ public final class DebugWorldRenderer {
             if (value.isSetLike()) {
                 itemName = name;
                 hoverName = name + " contains " + truncateLabel(item.display(), 48);
-            } else if (value.isDeque()) {
-                boolean front = i == 0;
-                boolean back = actualBackVisible && i == count - 1;
-                if (front && back) {
-                    itemName = name + "  FRONT / BACK";
-                } else if (front) {
-                    itemName = name + "  FRONT";
-                } else if (back) {
-                    itemName = name + "  BACK";
-                } else {
-                    itemName = name;
-                }
-                hoverName = name + "[" + i + "]";
             } else {
                 itemName = name + "[" + i + "]";
                 hoverName = itemName;
@@ -214,6 +210,61 @@ public final class DebugWorldRenderer {
                     changed ? ChatFormatting.YELLOW : ChatFormatting.WHITE
                 )
             );
+        }
+    }
+
+    private static void renderDeque(
+        String name,
+        RunnerClient.DebugValue value,
+        BlockPos base,
+        Map<BlockPos, BlockState> blocks,
+        Map<BlockPos, String> labels,
+        Map<BlockPos, Component> nameplates,
+        Map<BlockPos, Component> minecarts
+    ) {
+        int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
+        boolean actualBackVisible = count == value.items().size() && !value.truncated();
+        BlockState eastWestRail = Blocks.RAIL.defaultBlockState().setValue(RailBlock.SHAPE, RailShape.EAST_WEST);
+
+        // Keep a continuous line of rails, while spacing minecarts by two blocks so they do not
+        // immediately collide and shuffle the deque visualization around.
+        for (int x = 0; x <= Math.max(0, (count - 1) * 2); x++) {
+            blocks.put(base.relative(RIGHT, x), eastWestRail);
+        }
+
+        for (int i = 0; i < count; i++) {
+            RunnerClient.DebugValue item = value.items().get(i);
+            RunnerClient.DebugValue previous = previousSequenceItem(name, value, i, item);
+            boolean changed = sequenceItemChanged(name, value, i, item, previous);
+            BlockPos position = base.relative(RIGHT, i * 2);
+
+            boolean front = i == 0;
+            boolean back = actualBackVisible && i == count - 1;
+            String itemName;
+            if (front && back) {
+                itemName = name + "  FRONT / BACK";
+            } else if (front) {
+                itemName = name + "  FRONT";
+            } else if (back) {
+                itemName = name + "  BACK";
+            } else {
+                itemName = name + "[" + i + "]";
+            }
+
+            String detail = name + "[" + i + "] = " + truncateLabel(item.display(), 64)
+                + "  (" + item.type() + ")"
+                + changeSuffix(changed, previous);
+
+            labels.put(position, detail);
+            nameplates.put(
+                position,
+                twoLineNameplate(
+                    itemName,
+                    truncateLabel(item.display(), 28),
+                    changed ? ChatFormatting.YELLOW : ChatFormatting.LIGHT_PURPLE
+                )
+            );
+            minecarts.put(position, Component.literal(detail));
         }
     }
 
@@ -336,9 +387,6 @@ public final class DebugWorldRenderer {
     ) {
         if (changed) {
             return Blocks.YELLOW_CONCRETE.defaultBlockState();
-        }
-        if (container.isDeque()) {
-            return Blocks.PURPLE_CONCRETE.defaultBlockState();
         }
         if (container.isSetLike()) {
             return Blocks.CYAN_CONCRETE.defaultBlockState();
@@ -475,11 +523,16 @@ public final class DebugWorldRenderer {
         if (!DebugDimensionController.isInDebugDimension(minecraft)) {
             return;
         }
-        if (!(minecraft.hitResult instanceof BlockHitResult blockHit)) {
-            return;
+
+        String label = null;
+        if (minecraft.hitResult instanceof BlockHitResult blockHit) {
+            label = hoverLabels.get(blockHit.getBlockPos());
+        } else if (minecraft.hitResult instanceof EntityHitResult entityHit
+            && entityHit.getEntity() instanceof Minecart minecart
+            && minecart.getCustomName() != null) {
+            label = minecart.getCustomName().getString();
         }
 
-        String label = hoverLabels.get(blockHit.getBlockPos());
         if (label == null || label.isBlank()) {
             return;
         }
