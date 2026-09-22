@@ -24,6 +24,7 @@ public final class RunnerClient {
     private static final URI RUN_URI = URI.create(BASE_URL + "/run");
     private static final URI DEBUG_URI = URI.create(BASE_URL + "/debug");
     private static final URI PROBLEMS_URI = URI.create(BASE_URL + "/problems");
+    private static final String STDOUT_KEY = "$stdout";
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
         .connectTimeout(Duration.ofMillis(600))
@@ -125,22 +126,30 @@ public final class RunnerClient {
             if (stepArray != null) {
                 for (JsonElement element : stepArray) {
                     JsonObject step = element.getAsJsonObject();
-                    Map<String, DebugValue> locals = new LinkedHashMap<>();
+                    Map<String, DebugValue> typedLocals = new LinkedHashMap<>();
+                    Map<String, String> displayLocals = new LinkedHashMap<>();
                     JsonObject localsJson = step.getAsJsonObject("locals");
                     if (localsJson != null) {
                         for (Map.Entry<String, JsonElement> entry : localsJson.entrySet()) {
-                            if (entry.getValue().isJsonObject()) {
-                                locals.put(entry.getKey(), parseDebugValue(entry.getValue().getAsJsonObject()));
+                            if (!entry.getValue().isJsonObject()) {
+                                continue;
                             }
+                            DebugValue value = parseDebugValue(entry.getValue().getAsJsonObject());
+                            typedLocals.put(entry.getKey(), value);
+                            displayLocals.put(entry.getKey(), value.display());
                         }
                     }
                     String stdout = step.has("stdout") && !step.get("stdout").isJsonNull()
                         ? step.get("stdout").getAsString()
                         : null;
+                    if (stdout != null) {
+                        displayLocals.put(STDOUT_KEY, stdout);
+                    }
                     steps.add(new DebugStep(
                         step.get("line").getAsInt(),
                         step.get("event").getAsString(),
-                        Collections.unmodifiableMap(new LinkedHashMap<>(locals)),
+                        Collections.unmodifiableMap(new LinkedHashMap<>(displayLocals)),
+                        Collections.unmodifiableMap(new LinkedHashMap<>(typedLocals)),
                         stdout
                     ));
                 }
@@ -322,7 +331,13 @@ public final class RunnerClient {
     public record DebugEntry(DebugValue key, DebugValue value) {
     }
 
-    public record DebugStep(int line, String event, Map<String, DebugValue> locals, String stdout) {
+    public record DebugStep(
+        int line,
+        String event,
+        Map<String, String> locals,
+        Map<String, DebugValue> typedLocals,
+        String stdout
+    ) {
     }
 
     public record DebugResult(RunResult run, List<DebugStep> steps, boolean traceTruncated) {
