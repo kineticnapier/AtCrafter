@@ -2,6 +2,7 @@ package io.github.kineticnapier.atcrafter.client.runner;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.github.kineticnapier.atcrafter.client.screen.AtCoderBrowserScreen;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -9,6 +10,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 
 /** Client for the Runner's optional AtCoder submission bridge. */
 public final class AtCoderSubmissionClient {
@@ -54,7 +57,15 @@ public final class AtCoderSubmissionClient {
 
         return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
             .thenApply(response -> {
-                ensureOk(response);
+                if (response.statusCode() != 200) {
+                    String runnerMessage = errorMessage(response);
+                    openBrowserFallback(problemId, code);
+                    throw new IllegalStateException(
+                        "Web提出へ切り替えました。MCEF内のAtCoderでCAPTCHAを確認して提出してください。"
+                        + " (Runner: " + runnerMessage + ")"
+                    );
+                }
+
                 JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
                 return new SubmissionResult(
                     stringOr(json, "url", ""),
@@ -65,11 +76,22 @@ public final class AtCoderSubmissionClient {
             });
     }
 
+    private static void openBrowserFallback(String problemId, String code) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            Screen parent = minecraft.screen;
+            AtCoderBrowserScreen.open(parent, problemId, code);
+        });
+    }
+
     private static void ensureOk(HttpResponse<String> response) {
         if (response.statusCode() == 200) {
             return;
         }
+        throw new IllegalStateException(errorMessage(response));
+    }
 
+    private static String errorMessage(HttpResponse<String> response) {
         String message = "Runner returned HTTP " + response.statusCode();
         try {
             JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
@@ -81,7 +103,7 @@ public final class AtCoderSubmissionClient {
             }
         } catch (RuntimeException ignored) {
         }
-        throw new IllegalStateException(message);
+        return message;
     }
 
     private static String stringOr(JsonObject json, String name, String fallback) {
