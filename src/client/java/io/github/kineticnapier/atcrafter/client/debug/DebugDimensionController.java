@@ -2,7 +2,9 @@ package io.github.kineticnapier.atcrafter.client.debug;
 
 import io.github.kineticnapier.atcrafter.AtCrafter;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -14,13 +16,16 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Display;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import org.joml.Vector3f;
 
 /**
  * Moves the local singleplayer player into AtCrafter's dedicated debug dimension and owns
- * the real blocks used by the debug visualizer.
+ * the real blocks and text-display nameplates used by the debug visualizer.
  */
 public final class DebugDimensionController {
     public static final ResourceKey<Level> DEBUG_LEVEL = ResourceKey.create(
@@ -28,7 +33,6 @@ public final class DebugDimensionController {
         AtCrafter.id("debug")
     );
 
-    // Keep the debug room deterministic so stale blocks can always be cleaned after a crash.
     static final BlockPos DEBUG_ORIGIN = new BlockPos(0, -63, 0);
     static final int WORKSPACE_MIN_X = -4;
     static final int WORKSPACE_MAX_X = 14;
@@ -42,6 +46,7 @@ public final class DebugDimensionController {
     private static final float DEBUG_PITCH = 0.0f;
 
     private static final Set<BlockPos> placedBlocks = new HashSet<>();
+    private static final List<Display.TextDisplay> placedLabels = new ArrayList<>();
     private static boolean workspaceInitialized;
 
     private static volatile ReturnPoint returnPoint;
@@ -127,15 +132,16 @@ public final class DebugDimensionController {
         DebugWorldRenderer.activateHere(result, step);
     }
 
-    /** Replace the current visualization with real vanilla blocks. */
-    static void replaceDebugBlocks(Map<BlockPos, BlockState> blocks) {
+    /** Replace the current visualization with real blocks and server-side text displays. */
+    static void replaceDebugBlocks(Map<BlockPos, BlockState> blocks, Map<BlockPos, Component> labels) {
         Minecraft minecraft = Minecraft.getInstance();
         IntegratedServer server = minecraft.getSingleplayerServer();
         if (server == null) {
             return;
         }
 
-        Map<BlockPos, BlockState> requested = Map.copyOf(blocks);
+        Map<BlockPos, BlockState> requestedBlocks = Map.copyOf(blocks);
+        Map<BlockPos, Component> requestedLabels = Map.copyOf(labels);
         server.execute(() -> {
             ServerLevel debugLevel = server.getLevel(DEBUG_LEVEL);
             if (debugLevel == null) {
@@ -146,15 +152,36 @@ public final class DebugDimensionController {
                 clearWorkspace(debugLevel);
                 workspaceInitialized = true;
             } else {
-                clearPlacedBlocks(debugLevel);
+                clearPlacedObjects(debugLevel);
             }
 
-            for (Map.Entry<BlockPos, BlockState> entry : requested.entrySet()) {
+            for (Map.Entry<BlockPos, BlockState> entry : requestedBlocks.entrySet()) {
                 BlockPos position = entry.getKey().immutable();
                 debugLevel.setBlockAndUpdate(position, entry.getValue());
                 placedBlocks.add(position);
             }
+
+            for (Map.Entry<BlockPos, Component> entry : requestedLabels.entrySet()) {
+                spawnNameplate(debugLevel, entry.getKey(), entry.getValue());
+            }
         });
+    }
+
+    private static void spawnNameplate(ServerLevel level, BlockPos position, Component text) {
+        Display.TextDisplay display = EntityType.TEXT_DISPLAY.create(level);
+        if (display == null) {
+            return;
+        }
+
+        display.setPos(position.getX() + 0.5, position.getY() + 1.35, position.getZ() + 0.5);
+        display.setText(text);
+        display.setLineWidth(1000);
+        display.setBackgroundColor(0x50000000);
+        display.setBillboardConstraints(Display.BillboardConstraints.CENTER);
+        display.setScale(new Vector3f(0.8f, 0.8f, 0.8f));
+        display.setViewRange(1.0F);
+        level.addFreshEntity(display);
+        placedLabels.add(display);
     }
 
     public static void exit() {
@@ -185,7 +212,7 @@ public final class DebugDimensionController {
 
             ServerLevel debugLevel = server.getLevel(DEBUG_LEVEL);
             if (debugLevel != null) {
-                clearPlacedBlocks(debugLevel);
+                clearPlacedObjects(debugLevel);
             }
             workspaceInitialized = false;
 
@@ -204,8 +231,6 @@ public final class DebugDimensionController {
                 }
             }
 
-            // Recovery path: if Minecraft was restarted/crashed while inside atcrafter:debug,
-            // there is no in-memory return point. Backslash still brings the player home.
             ServerLevel overworld = server.overworld();
             BlockPos spawn = overworld.getSharedSpawnPos();
             player.teleportTo(
@@ -223,15 +248,22 @@ public final class DebugDimensionController {
         return minecraft.level != null && minecraft.level.dimension().equals(DEBUG_LEVEL);
     }
 
-    private static void clearPlacedBlocks(ServerLevel level) {
+    private static void clearPlacedObjects(ServerLevel level) {
         for (BlockPos position : placedBlocks) {
             level.setBlockAndUpdate(position, Blocks.AIR.defaultBlockState());
         }
         placedBlocks.clear();
+
+        for (Display.TextDisplay label : placedLabels) {
+            if (!label.isRemoved()) {
+                label.discard();
+            }
+        }
+        placedLabels.clear();
     }
 
     private static void clearWorkspace(ServerLevel level) {
-        placedBlocks.clear();
+        clearPlacedObjects(level);
         for (int x = WORKSPACE_MIN_X; x <= WORKSPACE_MAX_X; x++) {
             for (int z = WORKSPACE_MIN_Z; z <= WORKSPACE_MAX_Z; z++) {
                 level.setBlockAndUpdate(new BlockPos(x, DEBUG_ORIGIN.getY(), z), Blocks.AIR.defaultBlockState());
