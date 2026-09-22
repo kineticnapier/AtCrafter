@@ -17,8 +17,10 @@ import net.minecraft.util.FormattedCharSequence;
 public final class TerminalScreen extends Screen {
     private static final Component TITLE = Component.literal("AtCrafter");
     private static final String DEBUG_STDOUT_KEY = "$stdout";
+    private static final String[] ATCODER_TASKS = {"A", "B", "C", "D", "E", "F", "G"};
 
     private Tab currentTab = Tab.CODE;
+    private ProblemSource problemSource = ProblemSource.LOCAL;
 
     private MultiLineEditBox codeBox;
     private MultiLineEditBox stdinBox;
@@ -28,6 +30,8 @@ public final class TerminalScreen extends Screen {
     private Button debugTabButton;
     private Button previousProblemButton;
     private Button nextProblemButton;
+    private Button localSourceButton;
+    private Button atCoderSourceButton;
     private Button runButton;
     private Button sampleButton;
     private Button submitButton;
@@ -46,6 +50,9 @@ public final class TerminalScreen extends Screen {
     private List<RunnerClient.ProblemSummary> problems = List.of();
     private RunnerClient.ProblemData currentProblem;
     private int problemIndex = -1;
+    private int latestAtCoderContest = -1;
+    private int atCoderContest = -1;
+    private String atCoderTask = "A";
     private boolean loadingProblems;
     private boolean running;
     private String problemError = "";
@@ -138,13 +145,23 @@ public final class TerminalScreen extends Screen {
         }
 
         this.previousProblemButton = addRenderableWidget(
-            Button.builder(Component.literal("< 前"), button -> changeProblem(-1))
+            Button.builder(Component.literal("< 前"), button -> changeProblemOrContest(-1))
                 .bounds(slots[0], bottomY, slotWidth, 20)
                 .build()
         );
         this.nextProblemButton = addRenderableWidget(
-            Button.builder(Component.literal("次 >"), button -> changeProblem(1))
+            Button.builder(Component.literal("次 >"), button -> changeProblemOrContest(1))
                 .bounds(slots[1], bottomY, slotWidth, 20)
+                .build()
+        );
+        this.localSourceButton = addRenderableWidget(
+            Button.builder(Component.literal("ローカル"), button -> switchProblemSource(ProblemSource.LOCAL))
+                .bounds(slots[2], bottomY, slotWidth, 20)
+                .build()
+        );
+        this.atCoderSourceButton = addRenderableWidget(
+            Button.builder(Component.literal("AtCoder"), button -> switchProblemSource(ProblemSource.ATCODER))
+                .bounds(slots[3], bottomY, slotWidth, 20)
                 .build()
         );
         this.runButton = addRenderableWidget(
@@ -257,19 +274,45 @@ public final class TerminalScreen extends Screen {
                     return;
                 }
 
-                this.problems = loaded;
-                if (loaded.isEmpty()) {
-                    this.currentProblem = null;
-                    this.problemIndex = -1;
-                    this.problemError = "problems フォルダーに問題がありません。";
-                    updateActionButtons();
+                this.latestAtCoderContest = detectLatestAtCoderContest(loaded);
+                if (this.atCoderContest < 0 || this.atCoderContest > this.latestAtCoderContest) {
+                    this.atCoderContest = this.latestAtCoderContest;
+                }
+                this.problems = loaded.stream()
+                    .filter(problem -> !problem.id().startsWith("atcoder:"))
+                    .toList();
+
+                if (this.problemSource == ProblemSource.ATCODER) {
+                    if (this.latestAtCoderContest > 0) {
+                        loadAtCoderTask(this.atCoderTask);
+                    } else if (!this.problems.isEmpty()) {
+                        this.problemSource = ProblemSource.LOCAL;
+                        loadProblem(0);
+                    } else {
+                        this.currentProblem = null;
+                        this.problemError = "AtCoder 問題一覧を取得できませんでした。";
+                        updateActionButtons();
+                    }
+                    return;
+                }
+
+                if (this.problems.isEmpty()) {
+                    if (this.latestAtCoderContest > 0) {
+                        this.problemSource = ProblemSource.ATCODER;
+                        loadAtCoderTask("A");
+                    } else {
+                        this.currentProblem = null;
+                        this.problemIndex = -1;
+                        this.problemError = "problems フォルダーに問題がありません。";
+                        updateActionButtons();
+                    }
                     return;
                 }
 
                 int wanted = 0;
-                if (this.currentProblem != null) {
-                    for (int i = 0; i < loaded.size(); i++) {
-                        if (loaded.get(i).id().equals(this.currentProblem.id())) {
+                if (this.currentProblem != null && !this.currentProblem.id().startsWith("atcoder:")) {
+                    for (int i = 0; i < this.problems.size(); i++) {
+                        if (this.problems.get(i).id().equals(this.currentProblem.id())) {
                             wanted = i;
                             break;
                         }
@@ -278,6 +321,29 @@ public final class TerminalScreen extends Screen {
                 loadProblem(wanted);
             });
         });
+    }
+
+    private static int detectLatestAtCoderContest(List<RunnerClient.ProblemSummary> loaded) {
+        int latest = -1;
+        for (RunnerClient.ProblemSummary problem : loaded) {
+            String id = problem.id();
+            if (!id.startsWith("atcoder:abc")) {
+                continue;
+            }
+            int separator = id.indexOf(':', "atcoder:".length());
+            if (separator < 0) {
+                continue;
+            }
+            String contest = id.substring("atcoder:".length(), separator);
+            if (!contest.startsWith("abc")) {
+                continue;
+            }
+            try {
+                latest = Math.max(latest, Integer.parseInt(contest.substring(3)));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return latest;
     }
 
     private void loadProblem(int index) {
@@ -301,36 +367,78 @@ public final class TerminalScreen extends Screen {
                     updateActionButtons();
                     return;
                 }
-
-                this.problemIndex = index;
-                this.currentProblem = problem;
-                this.problemError = "";
-                this.problemScroll = 0;
-                this.judgeResults.clear();
-                this.selectedJudgeIndex = -1;
-                clearDebug();
-
-                String code = this.codeDrafts.get(problem.id());
-                if (code == null) {
-                    code = CodeDraftStore.get(problem.id());
-                }
-                if (code == null) {
-                    code = problem.defaultCode();
-                }
-                this.codeDrafts.put(problem.id(), code);
-                this.codeBox.setValue(code);
-
-                String stdin = this.stdinDrafts.get(problem.id());
-                if (stdin == null) {
-                    stdin = problem.samples().isEmpty() ? "" : problem.samples().get(0).stdin();
-                }
-                this.stdinBox.setValue(stdin);
-
-                this.resultText = problem.title() + " はまだ判定していません。";
-                this.resultColor = 0xA0A0A0;
-                updateActionButtons();
+                applyLoadedProblem(problem, index);
             });
         });
+    }
+
+    private void loadAtCoderTask(String task) {
+        if (this.atCoderContest <= 0 || this.latestAtCoderContest <= 0) {
+            this.problemError = "AtCoder コンテスト情報がありません。";
+            return;
+        }
+
+        saveDrafts();
+        String normalizedTask = task.toUpperCase();
+        String contestId = "abc" + this.atCoderContest;
+        String problemId = "atcoder:" + contestId + ":" + contestId + "_" + normalizedTask.toLowerCase();
+        this.loadingProblems = true;
+        this.problemError = "";
+
+        RunnerClient.loadProblem(problemId).whenComplete((problem, error) -> {
+            if (this.minecraft == null) {
+                return;
+            }
+            this.minecraft.execute(() -> {
+                this.loadingProblems = false;
+                if (error != null) {
+                    this.problemError = "ABC" + this.atCoderContest + " " + normalizedTask
+                        + " の読み込みに失敗しました: " + rootMessage(error);
+                    updateActionButtons();
+                    return;
+                }
+                this.atCoderTask = normalizedTask;
+                applyLoadedProblem(problem, -1);
+            });
+        });
+    }
+
+    private void applyLoadedProblem(RunnerClient.ProblemData problem, int localIndex) {
+        this.problemIndex = localIndex;
+        this.currentProblem = problem;
+        this.problemError = "";
+        this.problemScroll = 0;
+        this.judgeResults.clear();
+        this.selectedJudgeIndex = -1;
+        clearDebug();
+
+        String code = this.codeDrafts.get(problem.id());
+        if (code == null) {
+            code = CodeDraftStore.get(problem.id());
+        }
+        if (code == null) {
+            code = problem.defaultCode();
+        }
+        this.codeDrafts.put(problem.id(), code);
+        this.codeBox.setValue(code);
+
+        String stdin = this.stdinDrafts.get(problem.id());
+        if (stdin == null) {
+            stdin = problem.samples().isEmpty() ? "" : problem.samples().get(0).stdin();
+        }
+        this.stdinBox.setValue(stdin);
+
+        this.resultText = problem.title() + " はまだ判定していません。";
+        this.resultColor = 0xA0A0A0;
+        updateActionButtons();
+    }
+
+    private void changeProblemOrContest(int delta) {
+        if (this.problemSource == ProblemSource.ATCODER) {
+            changeContest(delta);
+        } else {
+            changeProblem(delta);
+        }
     }
 
     private void changeProblem(int delta) {
@@ -340,6 +448,48 @@ public final class TerminalScreen extends Screen {
         int next = this.problemIndex + delta;
         if (next >= 0 && next < this.problems.size()) {
             loadProblem(next);
+        }
+    }
+
+    private void changeContest(int delta) {
+        if (this.loadingProblems || this.atCoderContest <= 0 || this.latestAtCoderContest <= 0) {
+            return;
+        }
+        int next = this.atCoderContest + delta;
+        if (next < 1 || next > this.latestAtCoderContest) {
+            return;
+        }
+        this.atCoderContest = next;
+        this.atCoderTask = "A";
+        loadAtCoderTask(this.atCoderTask);
+    }
+
+    private void switchProblemSource(ProblemSource source) {
+        if (this.problemSource == source || this.loadingProblems) {
+            return;
+        }
+        saveDrafts();
+        this.problemSource = source;
+        this.problemScroll = 0;
+        this.problemError = "";
+
+        if (source == ProblemSource.ATCODER) {
+            if (this.latestAtCoderContest <= 0) {
+                this.problemError = "AtCoder 問題一覧を取得できていません。再読込してください。";
+                updateActionButtons();
+                return;
+            }
+            if (this.atCoderContest <= 0) {
+                this.atCoderContest = this.latestAtCoderContest;
+            }
+            loadAtCoderTask(this.atCoderTask);
+        } else if (!this.problems.isEmpty()) {
+            loadProblem(0);
+        } else {
+            this.currentProblem = null;
+            this.problemIndex = -1;
+            this.problemError = "ローカル問題がありません。";
+            updateActionButtons();
         }
     }
 
@@ -386,6 +536,8 @@ public final class TerminalScreen extends Screen {
         this.stdinBox.visible = code;
         this.previousProblemButton.visible = problem;
         this.nextProblemButton.visible = problem;
+        this.localSourceButton.visible = problem;
+        this.atCoderSourceButton.visible = problem;
         this.runButton.visible = code;
         this.sampleButton.visible = judge;
         this.submitButton.visible = judge;
@@ -421,9 +573,34 @@ public final class TerminalScreen extends Screen {
         this.runButton.active = available;
         this.sampleButton.active = available && !currentSamples().isEmpty();
         this.submitButton.active = available && !currentTests().isEmpty();
-        this.previousProblemButton.active = loaded && this.problemIndex > 0;
-        this.nextProblemButton.active = loaded && this.problemIndex >= 0 && this.problemIndex + 1 < this.problems.size();
         this.debugCaseButton.active = available && selectedFailure() != null;
+
+        this.localSourceButton.active = !this.loadingProblems
+            && this.problemSource != ProblemSource.LOCAL
+            && !this.problems.isEmpty();
+        this.atCoderSourceButton.active = !this.loadingProblems
+            && this.problemSource != ProblemSource.ATCODER
+            && this.latestAtCoderContest > 0;
+
+        if (this.problemSource == ProblemSource.ATCODER) {
+            int previousContest = this.atCoderContest - 1;
+            int nextContest = this.atCoderContest + 1;
+            this.previousProblemButton.setMessage(Component.literal(
+                previousContest >= 1 ? "< ABC" + previousContest : "<"
+            ));
+            this.nextProblemButton.setMessage(Component.literal(
+                nextContest <= this.latestAtCoderContest ? "ABC" + nextContest + " >" : ">"
+            ));
+            this.previousProblemButton.active = !this.loadingProblems && previousContest >= 1;
+            this.nextProblemButton.active = !this.loadingProblems && nextContest <= this.latestAtCoderContest;
+        } else {
+            this.previousProblemButton.setMessage(Component.literal("< 前"));
+            this.nextProblemButton.setMessage(Component.literal("次 >"));
+            this.previousProblemButton.active = loaded && this.problemIndex > 0;
+            this.nextProblemButton.active = loaded
+                && this.problemIndex >= 0
+                && this.problemIndex + 1 < this.problems.size();
+        }
 
         int stepCount = this.debugResult == null ? 0 : this.debugResult.steps().size();
         this.debugFirstButton.active = !this.running && stepCount > 0 && this.debugStepIndex > 0;
@@ -703,10 +880,16 @@ public final class TerminalScreen extends Screen {
     private void renderProblem(GuiGraphics graphics, int x, int y, int width, int bottom) {
         if (this.loadingProblems) {
             graphics.drawString(this.font, Component.literal("問題を読み込み中..."), x, y, 0xE0E0E0);
+            if (this.problemSource == ProblemSource.ATCODER && this.atCoderContest > 0) {
+                renderAtCoderTaskSelector(graphics, x, y + 16);
+            }
             return;
         }
         if (!this.problemError.isEmpty()) {
             graphics.drawWordWrap(this.font, Component.literal(this.problemError), x, y, width, 0xFF5555);
+            if (this.problemSource == ProblemSource.ATCODER && this.atCoderContest > 0) {
+                renderAtCoderTaskSelector(graphics, x, y + 28);
+            }
             return;
         }
         if (this.currentProblem == null) {
@@ -715,10 +898,18 @@ public final class TerminalScreen extends Screen {
         }
 
         graphics.drawString(this.font, Component.literal(this.currentProblem.title()), x, y, 0xFFFF55);
-        String counter = (this.problemIndex + 1) + " / " + this.problems.size();
+        String counter;
+        int viewportTop;
+        if (this.problemSource == ProblemSource.ATCODER) {
+            counter = "ABC" + this.atCoderContest + " / " + this.atCoderTask;
+            renderAtCoderTaskSelector(graphics, x, y + 16);
+            viewportTop = y + 40;
+        } else {
+            counter = (this.problemIndex + 1) + " / " + this.problems.size();
+            viewportTop = y + 16;
+        }
         graphics.drawString(this.font, Component.literal(counter), x + width - this.font.width(counter) - 8, y, 0xA0A0A0);
 
-        int viewportTop = y + 16;
         int viewportBottom = bottom;
         int viewportHeight = Math.max(1, viewportBottom - viewportTop);
         graphics.fill(x, viewportTop, x + width, viewportBottom, 0x33000000);
@@ -753,6 +944,32 @@ public final class TerminalScreen extends Screen {
             int travel = viewportHeight - thumbHeight;
             int thumbY = viewportTop + (int) ((long) this.problemScroll * travel / maxScroll);
             graphics.fill(trackX, thumbY, trackX + 3, thumbY + thumbHeight, 0xFFAAAAAA);
+        }
+    }
+
+    private void renderAtCoderTaskSelector(GuiGraphics graphics, int x, int y) {
+        int chipWidth = 34;
+        int gap = 4;
+        graphics.drawString(this.font, Component.literal("問題:"), x, y + 5, 0xAAAAAA);
+        int chipX = x + 38;
+        for (String task : ATCODER_TASKS) {
+            boolean selected = task.equals(this.atCoderTask);
+            graphics.fill(
+                chipX,
+                y,
+                chipX + chipWidth,
+                y + 18,
+                selected ? 0xAA6655AA : 0x66333333
+            );
+            int textX = chipX + (chipWidth - this.font.width(task)) / 2;
+            graphics.drawString(
+                this.font,
+                Component.literal(task),
+                textX,
+                y + 5,
+                selected ? 0xFFFFFF : 0xCCCCCC
+            );
+            chipX += chipWidth + gap;
         }
     }
 
@@ -1034,6 +1251,26 @@ public final class TerminalScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (button == 0 && this.currentTab == Tab.PROBLEM
+            && this.problemSource == ProblemSource.ATCODER
+            && !this.loadingProblems
+            && this.atCoderContest > 0) {
+            int chipWidth = 34;
+            int gap = 4;
+            int chipX = contentX() + 38;
+            int chipY = panelTop() + 16;
+            for (String task : ATCODER_TASKS) {
+                if (mouseX >= chipX && mouseX < chipX + chipWidth
+                    && mouseY >= chipY && mouseY < chipY + 18) {
+                    if (!task.equals(this.atCoderTask)) {
+                        loadAtCoderTask(task);
+                    }
+                    return true;
+                }
+                chipX += chipWidth + gap;
+            }
+        }
+
         if (button == 0 && this.currentTab == Tab.JUDGE && !this.judgeResults.isEmpty()) {
             int x = contentX();
             int y = panelTop();
@@ -1061,7 +1298,7 @@ public final class TerminalScreen extends Screen {
         if (this.currentTab == Tab.PROBLEM) {
             int x = contentX();
             int width = contentWidth();
-            int top = panelTop() + 16;
+            int top = panelTop() + (this.problemSource == ProblemSource.ATCODER ? 40 : 16);
             int bottom = panelBottom();
             if (mouseX >= x && mouseX < x + width && mouseY >= top && mouseY < bottom) {
                 int viewportHeight = Math.max(1, bottom - top);
@@ -1079,6 +1316,11 @@ public final class TerminalScreen extends Screen {
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+
+    private enum ProblemSource {
+        LOCAL,
+        ATCODER
     }
 
     private enum Tab {
