@@ -1,5 +1,6 @@
 package io.github.kineticnapier.atcrafter.client.screen;
 
+import io.github.kineticnapier.atcrafter.client.debug.DebugWorldRenderer;
 import io.github.kineticnapier.atcrafter.client.runner.RunnerClient;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -14,6 +15,7 @@ import net.minecraft.util.FormattedCharSequence;
 
 public final class TerminalScreen extends Screen {
     private static final Component TITLE = Component.literal("AtCrafter");
+    private static final String DEBUG_STDOUT_KEY = "$stdout";
 
     private Tab currentTab = Tab.CODE;
 
@@ -33,6 +35,7 @@ public final class TerminalScreen extends Screen {
     private Button debugPreviousButton;
     private Button debugNextButton;
     private Button debugLastButton;
+    private Button debugWorldButton;
     private Button refreshButton;
     private Button closeButton;
 
@@ -186,6 +189,11 @@ public final class TerminalScreen extends Screen {
                 }
             })
                 .bounds(slots[3], bottomY, slotWidth, 20)
+                .build()
+        );
+        this.debugWorldButton = addRenderableWidget(
+            Button.builder(Component.literal("世界表示"), button -> openDebugWorld())
+                .bounds(slots[4], bottomY, slotWidth, 20)
                 .build()
         );
 
@@ -370,6 +378,8 @@ public final class TerminalScreen extends Screen {
         this.debugPreviousButton.visible = debug;
         this.debugNextButton.visible = debug;
         this.debugLastButton.visible = debug;
+        this.debugWorldButton.visible = debug;
+        this.refreshButton.visible = !debug;
 
         this.problemTabButton.active = !problem;
         this.codeTabButton.active = !code;
@@ -404,6 +414,7 @@ public final class TerminalScreen extends Screen {
         this.debugPreviousButton.active = !this.running && stepCount > 0 && this.debugStepIndex > 0;
         this.debugNextButton.active = !this.running && stepCount > 0 && this.debugStepIndex + 1 < stepCount;
         this.debugLastButton.active = !this.running && stepCount > 0 && this.debugStepIndex + 1 < stepCount;
+        this.debugWorldButton.active = !this.running && stepCount > 0 && this.debugStepIndex >= 0;
     }
 
     private void setRunning(boolean value) {
@@ -612,12 +623,36 @@ public final class TerminalScreen extends Screen {
         });
     }
 
+    private void openDebugWorld() {
+        if (this.debugResult == null || this.debugResult.steps().isEmpty() || this.debugStepIndex < 0) {
+            return;
+        }
+        DebugWorldRenderer.activate(this.debugResult, this.debugStepIndex);
+        onClose();
+    }
+
     private void setDebugStep(int index) {
         if (this.debugResult == null || this.debugResult.steps().isEmpty()) {
             return;
         }
         this.debugStepIndex = Math.max(0, Math.min(index, this.debugResult.steps().size() - 1));
+        if (DebugWorldRenderer.isActive()) {
+            DebugWorldRenderer.setStep(this.debugStepIndex);
+        }
         updateActionButtons();
+    }
+
+    private String debugStdoutAt(int index) {
+        if (this.debugResult == null) {
+            return "";
+        }
+        for (int i = Math.min(index, this.debugResult.steps().size() - 1); i >= 0; i--) {
+            String stdout = this.debugResult.steps().get(i).locals().get(DEBUG_STDOUT_KEY);
+            if (stdout != null) {
+                return stdout;
+            }
+        }
+        return "";
     }
 
     @Override
@@ -888,35 +923,75 @@ public final class TerminalScreen extends Screen {
         int height,
         RunnerClient.DebugStep step
     ) {
+        int bottom = y + height;
+        int footerY = Math.max(y, bottom - 11);
+        int stdoutHeight = Math.max(38, Math.min(64, height / 3));
+        int stdoutTop = Math.max(y + 30, footerY - stdoutHeight);
+        int localsBottom = stdoutTop - 6;
+
         graphics.drawString(this.font, Component.literal("ローカル変数"), x, y, 0xE0E0E0);
         int cursorY = y + 15;
-        int bottom = y + height;
-        if (step.locals().isEmpty()) {
-            graphics.drawString(this.font, Component.literal("(なし)"), x, cursorY, 0x888888);
-        } else {
-            for (Map.Entry<String, String> entry : step.locals().entrySet()) {
-                if (cursorY + this.font.lineHeight >= bottom) {
-                    graphics.drawString(this.font, Component.literal("..."), x, cursorY, 0x888888);
+        boolean anyLocal = false;
+        for (Map.Entry<String, String> entry : step.locals().entrySet()) {
+            if (entry.getKey().equals(DEBUG_STDOUT_KEY)) {
+                continue;
+            }
+            anyLocal = true;
+            if (cursorY + this.font.lineHeight >= localsBottom) {
+                graphics.drawString(this.font, Component.literal("..."), x, cursorY, 0x888888);
+                break;
+            }
+            String text = entry.getKey() + " = " + entry.getValue();
+            List<FormattedCharSequence> wrapped = this.font.split(Component.literal(text), Math.max(20, width));
+            for (FormattedCharSequence line : wrapped) {
+                if (cursorY + this.font.lineHeight >= localsBottom) {
                     break;
                 }
-                String text = entry.getKey() + " = " + entry.getValue();
-                List<FormattedCharSequence> wrapped = this.font.split(Component.literal(text), Math.max(20, width));
-                for (FormattedCharSequence line : wrapped) {
-                    if (cursorY + this.font.lineHeight >= bottom) {
-                        break;
-                    }
-                    graphics.drawString(this.font, line, x, cursorY, 0xFFFFFF);
-                    cursorY += this.font.lineHeight + 2;
-                }
-                cursorY += 2;
+                graphics.drawString(this.font, line, x, cursorY, 0xFFFFFF);
+                cursorY += this.font.lineHeight + 2;
             }
+            cursorY += 2;
+        }
+        if (!anyLocal) {
+            graphics.drawString(this.font, Component.literal("(なし)"), x, cursorY, 0x888888);
+        }
+
+        graphics.fill(x, stdoutTop - 5, x + width, stdoutTop - 4, 0x44FFFFFF);
+        graphics.drawString(this.font, Component.literal("標準出力"), x, stdoutTop, 0x88FF88);
+
+        String stdout = debugStdoutAt(this.debugStepIndex);
+        String visibleStdout = stdout.isEmpty() ? "(空)" : stdout;
+        List<FormattedCharSequence> outputLines = this.font.split(
+            Component.literal(visibleStdout),
+            Math.max(20, width)
+        );
+        int outputY = stdoutTop + 13;
+        int maxOutputLines = Math.max(1, (footerY - outputY - 2) / (this.font.lineHeight + 1));
+        int outputCount = Math.min(maxOutputLines, outputLines.size());
+        for (int i = 0; i < outputCount; i++) {
+            graphics.drawString(
+                this.font,
+                outputLines.get(i),
+                x,
+                outputY + i * (this.font.lineHeight + 1),
+                stdout.isEmpty() ? 0x888888 : 0xFFFFFF
+            );
+        }
+        if (outputLines.size() > maxOutputLines && maxOutputLines > 0) {
+            graphics.drawString(this.font, Component.literal("..."), x + width - 16, footerY - 11, 0x888888);
         }
 
         RunnerClient.RunResult run = this.debugResult.run();
         String footer = run.timedOut()
             ? "TLE"
             : "終了=" + run.exitCode() + "  " + String.format("%.1f ms", run.elapsedMs());
-        graphics.drawString(this.font, Component.literal(footer), x, Math.max(y, bottom - 11), run.exitCode() != null && run.exitCode() == 0 ? 0xAAAAAA : 0xFFAA55);
+        graphics.drawString(
+            this.font,
+            Component.literal(footer),
+            x,
+            footerY,
+            run.exitCode() != null && run.exitCode() == 0 ? 0xAAAAAA : 0xFFAA55
+        );
     }
 
     private static int verdictColor(Verdict verdict) {
