@@ -18,6 +18,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Display;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.vehicle.Minecart;
 import net.minecraft.world.level.Level;
@@ -206,12 +207,15 @@ public final class DebugDimensionController {
 
     private static void spawnMinecart(ServerLevel level, BlockPos railPosition, MinecartSpec spec) {
         Vec3 start = minecartPosition(railPosition);
-        Minecart minecart = new Minecart(level, start.x, start.y, start.z);
+        DebugMinecart minecart = new DebugMinecart(level, start.x, start.y, start.z);
         minecart.setDeltaMovement(Vec3.ZERO);
         minecart.setCustomName(spec.detail());
         minecart.setCustomNameVisible(spec.animate());
         minecart.setInvulnerable(true);
         minecart.setSilent(true);
+        minecart.setNoGravity(true);
+        minecart.noPhysics = true;
+        minecart.setCanUseRail(false);
         level.addFreshEntity(minecart);
         placedMinecarts.add(minecart);
 
@@ -392,6 +396,32 @@ public final class DebugDimensionController {
 
         static MinecartSpec moving(Component detail, BlockPos target, boolean discardAtEnd) {
             return new MinecartSpec(detail, target, true, discardAtEnd);
+        }
+    }
+
+    /**
+     * A visual-only cart for the debugger. Vanilla minecarts push each other during their tick,
+     * which made popleft/pop animations bump the stationary deque elements. These carts keep the
+     * normal minecart renderer but deliberately opt out of entity collision and rail physics.
+     */
+    private static final class DebugMinecart extends Minecart {
+        private DebugMinecart(Level level, double x, double y, double z) {
+            super(level, x, y, z);
+        }
+
+        @Override
+        public boolean canCollideWith(Entity entity) {
+            return false;
+        }
+
+        @Override
+        public boolean isPushable() {
+            return false;
+        }
+
+        @Override
+        public void push(Entity entity) {
+            // Debug visualization only: deque carts must never shove one another.
         }
     }
 
