@@ -21,9 +21,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 PROBLEMS_DIR = ROOT_DIR / "problems"
 
 DEBUG_DRIVER = r'''
+import ast
 import io
 import json
 import math
+import operator
 import sys
 import traceback
 import types
@@ -39,6 +41,8 @@ MAX_DEPTH = 2
 steps = []
 trace_truncated = False
 last_stdout_snapshot = None
+access_specs = {}
+UNRESOLVED = object()
 
 IGNORED_LOCAL_TYPES = (
     types.ModuleType,
@@ -47,6 +51,14 @@ IGNORED_LOCAL_TYPES = (
     types.MethodType,
     type,
 )
+
+SAFE_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+}
 
 
 class TeeStdout:
@@ -158,6 +170,84 @@ def snapshot(frame):
     return result
 
 
+def add_access_spec(line, kind, variable, index_node):
+    access_specs.setdefault(line, []).append((kind, variable, index_node))
+
+
+class AccessCollector(ast.NodeVisitor):
+    def visit_Subscript(self, node):
+        if isinstance(node.value, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                add_access_spec(node.lineno, "write", node.value.id, node.slice)
+            elif isinstance(node.ctx, ast.Load):
+                add_access_spec(node.lineno, "read", node.value.id, node.slice)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node):
+        target = node.target
+        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            add_access_spec(target.lineno, "read", target.value.id, target.slice)
+        self.generic_visit(node)
+
+
+def lookup_name(frame, name):
+    if name in frame.f_locals:
+        return frame.f_locals[name]
+    if name in frame.f_globals:
+        return frame.f_globals[name]
+    return UNRESOLVED
+
+
+def resolve_index_node(node, frame):
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node, ast.Name):
+        value = lookup_name(frame, node.id)
+        return value if type(value) is int else UNRESOLVED
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = resolve_index_node(node.operand, frame)
+        if type(operand) is not int:
+            return UNRESOLVED
+        return operand if isinstance(node.op, ast.UAdd) else -operand
+    if isinstance(node, ast.BinOp):
+        operation = SAFE_BINOPS.get(type(node.op))
+        if operation is None:
+            return UNRESOLVED
+        left = resolve_index_node(node.left, frame)
+        right = resolve_index_node(node.right, frame)
+        if type(left) is not int or type(right) is not int:
+            return UNRESOLVED
+        try:
+            result = operation(left, right)
+        except Exception:
+            return UNRESOLVED
+        return result if type(result) is int else UNRESOLVED
+    return UNRESOLVED
+
+
+def resolve_accesses(frame, line):
+    result = []
+    seen = set()
+    for kind, variable, index_node in access_specs.get(line, []):
+        index = resolve_index_node(index_node, frame)
+        if type(index) is not int:
+            continue
+
+        container = lookup_name(frame, variable)
+        if container is not UNRESOLVED and index < 0:
+            try:
+                index += len(container)
+            except Exception:
+                pass
+
+        key = (kind, variable, index)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"kind": kind, "variable": variable, "index": index})
+    return result
+
+
 original_stdout = sys.stdout
 captured_stdout = TeeStdout(original_stdout)
 sys.stdout = captured_stdout
@@ -172,6 +262,10 @@ def tracer(frame, event, arg):
                 "event": event,
                 "locals": snapshot(frame),
             }
+            if event == "line":
+                accesses = resolve_accesses(frame, frame.f_lineno)
+                if accesses:
+                    step["accesses"] = accesses
             stdout_snapshot = captured_stdout.snapshot()
             if stdout_snapshot != last_stdout_snapshot:
                 step["stdout"] = stdout_snapshot
@@ -185,6 +279,8 @@ def tracer(frame, event, arg):
 namespace = {"__name__": "__main__", "__file__": TARGET}
 try:
     source = open(TARGET, "r", encoding="utf-8").read()
+    tree = ast.parse(source, TARGET, "exec")
+    AccessCollector().visit(tree)
     compiled = compile(source, TARGET, "exec")
     sys.settrace(tracer)
     exec(compiled, namespace, namespace)
@@ -413,7 +509,7 @@ def debug_python(code: str, stdin: str, timeout_ms: int) -> dict[str, Any]:
 
 
 class RunnerHandler(BaseHTTPRequestHandler):
-    server_version = "AtCrafterRunner/0.7"
+    server_version = "AtCrafterRunner/0.8"
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -433,7 +529,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "runnerVersion": "0.7",
+                    "runnerVersion": "0.8",
                     "python": sys.version.split()[0],
                     "problemCount": len(list_problems()),
                 },
