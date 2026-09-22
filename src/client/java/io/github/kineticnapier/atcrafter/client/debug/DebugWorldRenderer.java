@@ -110,7 +110,7 @@ public final class DebugWorldRenderer {
         Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
         Map<BlockPos, String> labels = new LinkedHashMap<>();
         Map<BlockPos, Component> nameplates = new LinkedHashMap<>();
-        Map<BlockPos, Component> minecarts = new LinkedHashMap<>();
+        Map<BlockPos, DebugDimensionController.MinecartSpec> minecarts = new LinkedHashMap<>();
 
         for (int row = 0; row < variables.size(); row++) {
             Map.Entry<String, RunnerClient.DebugValue> entry = variables.get(row);
@@ -220,22 +220,26 @@ public final class DebugWorldRenderer {
         Map<BlockPos, BlockState> blocks,
         Map<BlockPos, String> labels,
         Map<BlockPos, Component> nameplates,
-        Map<BlockPos, Component> minecarts
+        Map<BlockPos, DebugDimensionController.MinecartSpec> minecarts
     ) {
         int count = Math.min(MAX_SEQUENCE_ITEMS, value.items().size());
         boolean actualBackVisible = count == value.items().size() && !value.truncated();
         BlockState eastWestRail = Blocks.RAIL.defaultBlockState().setValue(RailBlock.SHAPE, RailShape.EAST_WEST);
+        DequeTransition transition = detectDequeTransition(name, value);
+        RunnerClient.DebugValue previousDeque = previousValue(name);
+        int previousCount = previousDeque != null && previousDeque.isDeque()
+            ? Math.min(MAX_SEQUENCE_ITEMS, previousDeque.items().size())
+            : count;
 
-        // Keep a continuous line of rails, while spacing minecarts by two blocks so they do not
-        // immediately collide and shuffle the deque visualization around.
-        for (int x = 0; x <= Math.max(0, (count - 1) * 2); x++) {
+        int maxRailX = Math.max(4, Math.max(count, previousCount) * 2 + 4);
+        for (int x = -4; x <= maxRailX; x++) {
             blocks.put(base.relative(RIGHT, x), eastWestRail);
         }
 
         for (int i = 0; i < count; i++) {
             RunnerClient.DebugValue item = value.items().get(i);
-            RunnerClient.DebugValue previous = previousSequenceItem(name, value, i, item);
-            boolean changed = sequenceItemChanged(name, value, i, item, previous);
+            RunnerClient.DebugValue previous = previousDequeItem(name, transition, i);
+            boolean changed = previousDeque != null && previous == null;
             BlockPos position = base.relative(RIGHT, i * 2);
 
             boolean front = i == 0;
@@ -264,7 +268,43 @@ public final class DebugWorldRenderer {
                     changed ? ChatFormatting.YELLOW : ChatFormatting.LIGHT_PURPLE
                 )
             );
-            minecarts.put(position, Component.literal(detail));
+
+            boolean incomingAppend = transition.kind() == DequeOperation.APPEND && i == count - 1;
+            boolean incomingAppendLeft = transition.kind() == DequeOperation.APPEND_LEFT && i == 0;
+            Component minecartDetail = Component.literal(detail);
+
+            if (incomingAppend) {
+                BlockPos start = position.relative(RIGHT, 2);
+                minecarts.put(
+                    start,
+                    DebugDimensionController.MinecartSpec.moving(minecartDetail, position, false)
+                );
+            } else if (incomingAppendLeft) {
+                BlockPos start = position.relative(RIGHT, -2);
+                minecarts.put(
+                    start,
+                    DebugDimensionController.MinecartSpec.moving(minecartDetail, position, false)
+                );
+            } else {
+                minecarts.put(position, DebugDimensionController.MinecartSpec.stable(minecartDetail, position));
+            }
+        }
+
+        if (transition.kind() == DequeOperation.POP_LEFT && transition.item() != null) {
+            BlockPos start = base.relative(RIGHT, -1);
+            BlockPos target = base.relative(RIGHT, -4);
+            Component detail = Component.literal(
+                name + ".popleft() → " + truncateLabel(transition.item().display(), 40)
+            ).withStyle(ChatFormatting.RED);
+            minecarts.put(start, DebugDimensionController.MinecartSpec.moving(detail, target, true));
+        } else if (transition.kind() == DequeOperation.POP && transition.item() != null) {
+            int oldLastIndex = previousDeque == null ? count : previousDeque.items().size() - 1;
+            BlockPos start = base.relative(RIGHT, oldLastIndex * 2);
+            BlockPos target = start.relative(RIGHT, 4);
+            Component detail = Component.literal(
+                name + ".pop() → " + truncateLabel(transition.item().display(), 40)
+            ).withStyle(ChatFormatting.RED);
+            minecarts.put(start, DebugDimensionController.MinecartSpec.moving(detail, target, true));
         }
     }
 
@@ -459,6 +499,84 @@ public final class DebugWorldRenderer {
         return previousItem == null || !sameValue(previousItem, item);
     }
 
+    private static RunnerClient.DebugValue previousDequeItem(
+        String name,
+        DequeTransition transition,
+        int currentIndex
+    ) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        if (previous == null || !previous.isDeque()) {
+            return null;
+        }
+
+        int previousIndex = switch (transition.kind()) {
+            case APPEND, POP, NONE -> currentIndex;
+            case APPEND_LEFT -> currentIndex - 1;
+            case POP_LEFT -> currentIndex + 1;
+        };
+
+        if (previousIndex < 0 || previousIndex >= previous.items().size()) {
+            return null;
+        }
+        return previous.items().get(previousIndex);
+    }
+
+    private static DequeTransition detectDequeTransition(String name, RunnerClient.DebugValue current) {
+        RunnerClient.DebugValue previous = previousValue(name);
+        if (previous == null || !previous.isDeque() || !current.isDeque()) {
+            return DequeTransition.none();
+        }
+        if (previous.truncated() || current.truncated()) {
+            return DequeTransition.none();
+        }
+        if (previous.items().size() > MAX_SEQUENCE_ITEMS || current.items().size() > MAX_SEQUENCE_ITEMS) {
+            return DequeTransition.none();
+        }
+
+        List<RunnerClient.DebugValue> before = previous.items();
+        List<RunnerClient.DebugValue> after = current.items();
+
+        if (after.size() == before.size() + 1) {
+            if (sameRange(before, 0, after, 0, before.size())) {
+                return new DequeTransition(DequeOperation.APPEND, after.get(after.size() - 1));
+            }
+            if (sameRange(before, 0, after, 1, before.size())) {
+                return new DequeTransition(DequeOperation.APPEND_LEFT, after.get(0));
+            }
+        }
+
+        if (after.size() + 1 == before.size()) {
+            if (sameRange(after, 0, before, 1, after.size())) {
+                return new DequeTransition(DequeOperation.POP_LEFT, before.get(0));
+            }
+            if (sameRange(after, 0, before, 0, after.size())) {
+                return new DequeTransition(DequeOperation.POP, before.get(before.size() - 1));
+            }
+        }
+
+        return DequeTransition.none();
+    }
+
+    private static boolean sameRange(
+        List<RunnerClient.DebugValue> left,
+        int leftStart,
+        List<RunnerClient.DebugValue> right,
+        int rightStart,
+        int length
+    ) {
+        if (leftStart < 0 || rightStart < 0
+            || leftStart + length > left.size()
+            || rightStart + length > right.size()) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            if (!sameValue(left.get(leftStart + i), right.get(rightStart + i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static RunnerClient.DebugEntry previousDictEntry(String name, RunnerClient.DebugValue key) {
         RunnerClient.DebugValue previous = previousValue(name);
         if (previous == null || !previous.isDict()) {
@@ -502,13 +620,37 @@ public final class DebugWorldRenderer {
             return;
         }
         RunnerClient.DebugStep step = debugResult.steps().get(stepIndex);
+        String dequeOperation = dequeOperationSummary(step);
         minecraft.player.displayClientMessage(
             Component.literal(
                 "AtCrafter " + (stepIndex + 1) + "/" + debugResult.steps().size()
                     + "  行 " + step.line()
+                    + (dequeOperation.isEmpty() ? "" : "  |  " + dequeOperation)
             ),
             true
         );
+    }
+
+    private static String dequeOperationSummary(RunnerClient.DebugStep step) {
+        for (Map.Entry<String, RunnerClient.DebugValue> entry : step.typedLocals().entrySet()) {
+            RunnerClient.DebugValue value = entry.getValue();
+            if (!value.isDeque()) {
+                continue;
+            }
+            DequeTransition transition = detectDequeTransition(entry.getKey(), value);
+            if (transition.kind() == DequeOperation.NONE || transition.item() == null) {
+                continue;
+            }
+            String item = truncateLabel(transition.item().display(), 24);
+            return switch (transition.kind()) {
+                case APPEND -> entry.getKey() + ".append(" + item + ")";
+                case APPEND_LEFT -> entry.getKey() + ".appendleft(" + item + ")";
+                case POP -> entry.getKey() + ".pop() → " + item;
+                case POP_LEFT -> entry.getKey() + ".popleft() → " + item;
+                case NONE -> "";
+            };
+        }
+        return "";
     }
 
     private static void renderHud(GuiGraphics graphics) {
@@ -571,5 +713,19 @@ public final class DebugWorldRenderer {
             return normalized;
         }
         return normalized.substring(0, Math.max(0, limit - 3)) + "...";
+    }
+
+    private enum DequeOperation {
+        NONE,
+        APPEND,
+        APPEND_LEFT,
+        POP,
+        POP_LEFT
+    }
+
+    private record DequeTransition(DequeOperation kind, RunnerClient.DebugValue item) {
+        private static DequeTransition none() {
+            return new DequeTransition(DequeOperation.NONE, null);
+        }
     }
 }
