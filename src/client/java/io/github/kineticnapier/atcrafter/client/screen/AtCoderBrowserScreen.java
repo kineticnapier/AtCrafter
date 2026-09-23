@@ -2,6 +2,7 @@ package io.github.kineticnapier.atcrafter.client.screen;
 
 import com.cinemamod.mcef.MCEF;
 import com.cinemamod.mcef.MCEFBrowser;
+import com.google.gson.JsonPrimitive;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.BufferUploader;
@@ -21,9 +22,9 @@ import org.lwjgl.glfw.GLFW;
 /**
  * Small MCEF-backed browser used for AtCoder's human-confirmed web submission flow.
  *
- * The source code is copied to the OS clipboard before this screen opens. AtCoder's
- * own submit page remains responsible for login, CAPTCHA/Turnstile, language choice,
- * and the final submit click.
+ * AtCrafter fills the selected task, a CPython language, and the current source code.
+ * AtCoder's own page remains responsible for login, CAPTCHA/Turnstile, and the final
+ * submit click.
  */
 public final class AtCoderBrowserScreen extends Screen {
     private static final Pattern PROBLEM_ID = Pattern.compile(
@@ -36,14 +37,19 @@ public final class AtCoderBrowserScreen extends Screen {
 
     private final Screen parent;
     private final String submitUrl;
+    private final String taskId;
+    private final String sourceCode;
     private MCEFBrowser browser;
     private boolean initScheduled;
+    private int autoFillTicker;
     private String status = "MCEF を初期化中...";
 
-    private AtCoderBrowserScreen(Screen parent, String submitUrl) {
+    private AtCoderBrowserScreen(Screen parent, String submitUrl, String taskId, String sourceCode) {
         super(Component.literal("AtCrafter - AtCoder 提出"));
         this.parent = parent;
         this.submitUrl = submitUrl;
+        this.taskId = taskId;
+        this.sourceCode = sourceCode;
     }
 
     public static void open(Screen parent, String problemId, String code) {
@@ -58,8 +64,9 @@ public final class AtCoderBrowserScreen extends Screen {
             + "/submit?taskScreenName=" + taskId;
 
         Minecraft minecraft = Minecraft.getInstance();
+        // Keep the clipboard fallback in case AtCoder changes its submit form.
         minecraft.keyboardHandler.setClipboard(code);
-        minecraft.setScreen(new AtCoderBrowserScreen(parent, url));
+        minecraft.setScreen(new AtCoderBrowserScreen(parent, url, taskId, code));
     }
 
     @Override
@@ -73,6 +80,8 @@ public final class AtCoderBrowserScreen extends Screen {
             Button.builder(Component.literal("再読込"), button -> {
                 if (this.browser != null) {
                     this.browser.reload();
+                    this.autoFillTicker = 0;
+                    this.status = "再読込中... 自動入力を待っています。";
                 }
             })
                 .bounds(LEFT + 58, 4, 62, 20)
@@ -118,9 +127,109 @@ public final class AtCoderBrowserScreen extends Screen {
             this.browser = MCEF.createBrowser(this.submitUrl, false);
             this.browser.useBrowserControls(true);
             resizeBrowser();
-            this.status = "コードはクリップボードにコピー済みです。提出欄で Ctrl+V。";
+            this.status = "問題・Python・コードを自動入力します。CAPTCHA確認後に提出してください。";
         } catch (RuntimeException error) {
             this.status = "MCEF ブラウザを開けませんでした: " + rootMessage(error);
+        }
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (this.browser == null) {
+            return;
+        }
+
+        // The submit page may appear only after logging in, and AtCoder fills parts of
+        // the form asynchronously. Re-run a small idempotent script until that document
+        // marks itself as filled.
+        if (++this.autoFillTicker >= 10) {
+            this.autoFillTicker = 0;
+            injectAutoFill();
+        }
+    }
+
+    private void injectAutoFill() {
+        if (this.browser == null || this.browser.isLoading() || !this.browser.hasDocument()) {
+            return;
+        }
+
+        String currentUrl = this.browser.getURL();
+        if (currentUrl == null || !currentUrl.contains("/submit")) {
+            return;
+        }
+
+        String taskJson = new JsonPrimitive(this.taskId).toString();
+        String sourceJson = new JsonPrimitive(this.sourceCode).toString();
+        String script = """
+            (() => {
+                const root = document.documentElement;
+                if (!root || root.dataset.atcrafterFilled === '1') return;
+
+                const taskId = %s;
+                const source = %s;
+                const task = document.querySelector('select[name="data.TaskScreenName"]');
+                const language = document.querySelector('select[name="data.LanguageId"]');
+                if (!task || !language) return;
+
+                if (task.value !== taskId) {
+                    const option = Array.from(task.options).find(o => o.value === taskId);
+                    if (!option) return;
+                    task.value = taskId;
+                    task.dispatchEvent(new Event('change', { bubbles: true }));
+                    return;
+                }
+
+                const candidates = Array.from(language.options).filter(option => {
+                    const text = (option.textContent || '').toLowerCase();
+                    return option.value && text.includes('python');
+                });
+                if (candidates.length === 0) return;
+
+                const score = option => {
+                    const text = option.textContent || '';
+                    const lower = text.toLowerCase();
+                    let family = 0;
+                    if (lower.includes('cpython')) family = 400;
+                    else if (lower.includes('pypy')) family = 200;
+                    else if (lower.includes('cython') || lower.includes('micropython')) family = 100;
+                    else if (lower.includes('python')) family = 300;
+
+                    const version = text.match(/(\\d+)\\.(\\d+)(?:\\.(\\d+))?/);
+                    const major = version ? Number(version[1]) : 0;
+                    const minor = version ? Number(version[2]) : 0;
+                    const patch = version && version[3] ? Number(version[3]) : 0;
+                    const id = Number(option.value) || 0;
+                    return family * 100000000 + major * 1000000 + minor * 10000 + patch * 100 + id;
+                };
+
+                candidates.sort((a, b) => score(b) - score(a));
+                const selectedLanguage = candidates[0];
+                if (language.value !== selectedLanguage.value) {
+                    language.value = selectedLanguage.value;
+                    language.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+
+                const code = document.querySelector('textarea[name="sourceCode"]');
+                if (!code) return;
+
+                const codeMirrorNode = document.querySelector('.CodeMirror');
+                const codeMirror = codeMirrorNode && codeMirrorNode.CodeMirror;
+                if (codeMirror && typeof codeMirror.setValue === 'function') {
+                    codeMirror.setValue(source);
+                }
+                code.value = source;
+                code.dispatchEvent(new Event('input', { bubbles: true }));
+                code.dispatchEvent(new Event('change', { bubbles: true }));
+
+                root.dataset.atcrafterFilled = '1';
+            })();
+            """.formatted(taskJson, sourceJson);
+
+        try {
+            this.browser.executeJavaScript(script, currentUrl, 1);
+        } catch (RuntimeException error) {
+            this.status = "自動入力に失敗しました。Ctrl+V は使用できます: " + rootMessage(error);
         }
     }
 
