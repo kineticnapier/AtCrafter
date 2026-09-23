@@ -140,9 +140,9 @@ public final class AtCoderBrowserScreen extends Screen {
             return;
         }
 
-        // The submit page may appear only after logging in, and AtCoder fills parts of
-        // the form asynchronously. Re-run a small idempotent script until that document
-        // marks itself as filled.
+        // The submit page may appear only after logging in, and AtCoder rebuilds parts
+        // of the form after task/language changes. Retry until the page itself marks
+        // the current document as completely filled.
         if (++this.autoFillTicker >= 10) {
             this.autoFillTicker = 0;
             injectAutoFill();
@@ -150,7 +150,10 @@ public final class AtCoderBrowserScreen extends Screen {
     }
 
     private void injectAutoFill() {
-        if (this.browser == null || this.browser.isLoading() || !this.browser.hasDocument()) {
+        // Do not gate this on CefBrowser#isLoading(). Third-party widgets such as
+        // Turnstile can keep the browser in a loading state after the submit form is
+        // already usable. hasDocument() is enough; the script has its own readiness checks.
+        if (this.browser == null || !this.browser.hasDocument()) {
             return;
         }
 
@@ -165,6 +168,7 @@ public final class AtCoderBrowserScreen extends Screen {
             (() => {
                 const root = document.documentElement;
                 if (!root || root.dataset.atcrafterFilled === '1') return;
+                if (document.readyState === 'loading') return;
 
                 const taskId = %s;
                 const source = %s;
@@ -172,11 +176,21 @@ public final class AtCoderBrowserScreen extends Screen {
                 const language = document.querySelector('select[name="data.LanguageId"]');
                 if (!task || !language) return;
 
+                const change = element => {
+                    if (window.jQuery) {
+                        window.jQuery(element).trigger('change');
+                    } else {
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                };
+
                 if (task.value !== taskId) {
                     const option = Array.from(task.options).find(o => o.value === taskId);
                     if (!option) return;
                     task.value = taskId;
-                    task.dispatchEvent(new Event('change', { bubbles: true }));
+                    change(task);
+                    // AtCoder rebuilds the language list after changing the task.
+                    // Wait for the next injection pass before touching anything else.
                     return;
                 }
 
@@ -207,7 +221,11 @@ public final class AtCoderBrowserScreen extends Screen {
                 const selectedLanguage = candidates[0];
                 if (language.value !== selectedLanguage.value) {
                     language.value = selectedLanguage.value;
-                    language.dispatchEvent(new Event('change', { bubbles: true }));
+                    change(language);
+                    // This was the important bug: AtCoder can recreate/reset the editor
+                    // in the language-change handler. Filling sourceCode in the same pass
+                    // meant our value was immediately wiped. Let that handler finish first.
+                    return;
                 }
 
                 const code = document.querySelector('textarea[name="sourceCode"]');
@@ -215,12 +233,38 @@ public final class AtCoderBrowserScreen extends Screen {
 
                 const codeMirrorNode = document.querySelector('.CodeMirror');
                 const codeMirror = codeMirrorNode && codeMirrorNode.CodeMirror;
+                // If CodeMirror's DOM already exists but its JS instance is not attached yet,
+                // wait instead of filling the hidden textarea just before initialization.
+                if (codeMirrorNode && !codeMirror) return;
+
+                let editorUpdated = false;
                 if (codeMirror && typeof codeMirror.setValue === 'function') {
                     codeMirror.setValue(source);
+                    editorUpdated = typeof codeMirror.getValue !== 'function' || codeMirror.getValue() === source;
                 }
+
+                // Keep the real form field in sync as well. This also covers the plain
+                // textarea fallback if AtCoder disables its editor.
                 code.value = source;
                 code.dispatchEvent(new Event('input', { bubbles: true }));
                 code.dispatchEvent(new Event('change', { bubbles: true }));
+
+                // Some AtCoder editor revisions have used Ace. Support it without making
+                // it a requirement for the normal CodeMirror/plain-textarea path.
+                const aceNode = document.querySelector('.ace_editor');
+                if (!editorUpdated && aceNode && window.ace && typeof window.ace.edit === 'function') {
+                    try {
+                        const aceEditor = window.ace.edit(aceNode);
+                        aceEditor.setValue(source, -1);
+                        editorUpdated = typeof aceEditor.getValue !== 'function' || aceEditor.getValue() === source;
+                    } catch (_) {
+                        return;
+                    }
+                }
+
+                if (code.value !== source) return;
+                if (codeMirrorNode && !editorUpdated) return;
+                if (aceNode && !editorUpdated) return;
 
                 root.dataset.atcrafterFilled = '1';
             })();
